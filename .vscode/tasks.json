@@ -1,0 +1,23 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "gradle",
+			"id": "/home/sammy/Documents/csc/java/jloxrunjlox",
+			"script": "run",
+			"description": "Runs this project as a JVM application",
+			"group": "application",
+			"project": "jlox",
+			"buildFile": "/var/home/sammy/Documents/csc/java/jlox/build.gradle",
+			"rootProject": "jlox",
+			"projectFolder": "/home/sammy/Documents/csc/java/jlox",
+			"workspaceFolder": "/home/sammy/Documents/csc/java/jlox",
+			"args": "",
+			"javaDebug": false,
+			"problemMatcher": [
+				"$gradle"
+			],
+			"label": "gradle: run"
+		}
+	]
+}
