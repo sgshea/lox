@@ -5,7 +5,7 @@ package jlox;
  */
 abstract class Expr {
     interface Visitor<R> {
-        // R visitAssignExpr(Assign expr);
+        R visitAssignExpr(Assign expr);
 
         R visitBinaryExpr(Binary expr);
 
@@ -17,7 +17,7 @@ abstract class Expr {
 
         R visitLiteralExpr(Literal expr);
 
-        // R visitLogicalExpr(Logical expr);
+        R visitLogicalExpr(Logical expr);
 
         // R visitSetExpr(Set expr);
 
@@ -27,26 +27,26 @@ abstract class Expr {
 
         R visitUnaryExpr(Unary expr);
 
-        // R visitVariableExpr(Variable expr);
+        R visitVariableExpr(Variable expr);
     }
 
     /**
      * Assignment expression
      */
-    // static class Assign extends Expr {
-    //     Assign(Token name, Expr value) {
-    //         this.name = name;
-    //         this.value = value;
-    //     }
+    static class Assign extends Expr {
+        Assign(Token name, Expr value) {
+            this.name = name;
+            this.value = value;
+        }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitAssignExpr(this);
-    //     }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitAssignExpr(this);
+        }
 
-    //     final Token name;
-    //     final Expr value;
-    // }
+        final Token name;
+        final Expr value;
+    }
 
     /**
      * Binary expression
@@ -72,38 +72,38 @@ abstract class Expr {
      * Function call expression
      */
     // static class Call extends Expr {
-    //     Call(Expr callee, Token paren, List<Expr> arguments) {
-    //         this.callee = callee;
-    //         this.paren = paren;
-    //         this.arguments = arguments;
-    //     }
+    // Call(Expr callee, Token paren, List<Expr> arguments) {
+    // this.callee = callee;
+    // this.paren = paren;
+    // this.arguments = arguments;
+    // }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitCallExpr(this);
-    //     }
+    // @Override
+    // <R> R accept(Visitor<R> visitor) {
+    // return visitor.visitCallExpr(this);
+    // }
 
-    //     final Expr callee;
-    //     final Token paren;
-    //     final List<Expr> arguments;
+    // final Expr callee;
+    // final Token paren;
+    // final List<Expr> arguments;
     // }
 
     /**
      * Get expression
      */
     // static class Get extends Expr {
-    //     Get(Expr object, Token name) {
-    //         this.object = object;
-    //         this.name = name;
-    //     }
+    // Get(Expr object, Token name) {
+    // this.object = object;
+    // this.name = name;
+    // }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitGetExpr(this);
-    //     }
+    // @Override
+    // <R> R accept(Visitor<R> visitor) {
+    // return visitor.visitGetExpr(this);
+    // }
 
-    //     final Expr object;
-    //     final Token name;
+    // final Expr object;
+    // final Token name;
     // }
 
     /**
@@ -141,75 +141,75 @@ abstract class Expr {
     /**
      * Logical expression
      */
-    // static class Logical extends Expr {
-    //     Logical(Expr left, Token operator, Expr right) {
-    //         this.left = left;
-    //         this.operator = operator;
-    //         this.right = right;
-    //     }
+    static class Logical extends Expr {
+        Logical(Expr left, Token operator, Expr right) {
+            this.left = left;
+            this.operator = operator;
+            this.right = right;
+        }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitLogicalExpr(this);
-    //     }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitLogicalExpr(this);
+        }
 
-    //     final Expr left;
-    //     final Token operator;
-    //     final Expr right;
-    // }
+        final Expr left;
+        final Token operator;
+        final Expr right;
+    }
 
     /**
      * Set expression
      */
     // static class Set extends Expr {
-    //     Set(Expr object, Token name, Expr value) {
-    //         this.object = object;
-    //         this.name = name;
-    //         this.value = value;
-    //     }
+    // Set(Expr object, Token name, Expr value) {
+    // this.object = object;
+    // this.name = name;
+    // this.value = value;
+    // }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitSetExpr(this);
-    //     }
+    // @Override
+    // <R> R accept(Visitor<R> visitor) {
+    // return visitor.visitSetExpr(this);
+    // }
 
-    //     final Expr object;
-    //     final Token name;
-    //     final Expr value;
+    // final Expr object;
+    // final Token name;
+    // final Expr value;
     // }
 
     /**
      * Super expression
      */
     // static class Super extends Expr {
-    //     Super(Token keyword, Token method) {
-    //         this.keyword = keyword;
-    //         this.method = method;
-    //     }
+    // Super(Token keyword, Token method) {
+    // this.keyword = keyword;
+    // this.method = method;
+    // }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitSuperExpr(this);
-    //     }
+    // @Override
+    // <R> R accept(Visitor<R> visitor) {
+    // return visitor.visitSuperExpr(this);
+    // }
 
-    //     final Token keyword;
-    //     final Token method;
+    // final Token keyword;
+    // final Token method;
     // }
 
     // /**
-    //  * This expression
-    //  */
+    // * This expression
+    // */
     // static class This extends Expr {
-    //     This(Token keyword) {
-    //         this.keyword = keyword;
-    //     }
+    // This(Token keyword) {
+    // this.keyword = keyword;
+    // }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitThisExpr(this);
-    //     }
+    // @Override
+    // <R> R accept(Visitor<R> visitor) {
+    // return visitor.visitThisExpr(this);
+    // }
 
-    //     final Token keyword;
+    // final Token keyword;
     // }
 
     /**
@@ -233,18 +233,18 @@ abstract class Expr {
     /**
      * Variable expression
      */
-    // static class Variable extends Expr {
-    //     Variable(Token name) {
-    //         this.name = name;
-    //     }
+    static class Variable extends Expr {
+        Variable(Token name) {
+            this.name = name;
+        }
 
-    //     @Override
-    //     <R> R accept(Visitor<R> visitor) {
-    //         return visitor.visitVariableExpr(this);
-    //     }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitVariableExpr(this);
+        }
 
-    //     final Token name;
-    // }
+        final Token name;
+    }
 
     abstract <R> R accept(Visitor<R> visitor);
 }
