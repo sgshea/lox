@@ -1,5 +1,7 @@
 package jlox;
 
+import java.util.List;
+
 /**
  * Expression visitor pattern for the language expressions
  */
@@ -9,7 +11,7 @@ abstract class Expr {
 
         R visitBinaryExpr(Binary expr);
 
-        // R visitCallExpr(Call expr);
+        R visitCallExpr(Call expr);
 
         // R visitGetExpr(Get expr);
 
@@ -71,22 +73,22 @@ abstract class Expr {
     /**
      * Function call expression
      */
-    // static class Call extends Expr {
-    // Call(Expr callee, Token paren, List<Expr> arguments) {
-    // this.callee = callee;
-    // this.paren = paren;
-    // this.arguments = arguments;
-    // }
+    static class Call extends Expr {
+        Call(Expr callee, Token paren, List<Expr> arguments) {
+            this.callee = callee;
+            this.paren = paren;
+            this.arguments = arguments;
+        }
 
-    // @Override
-    // <R> R accept(Visitor<R> visitor) {
-    // return visitor.visitCallExpr(this);
-    // }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitCallExpr(this);
+        }
 
-    // final Expr callee;
-    // final Token paren;
-    // final List<Expr> arguments;
-    // }
+        final Expr callee;
+        final Token paren;
+        final List<Expr> arguments;
+    }
 
     /**
      * Get expression
