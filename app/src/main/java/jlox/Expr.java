@@ -13,7 +13,7 @@ abstract class Expr {
 
         R visitCallExpr(Call expr);
 
-        // R visitGetExpr(Get expr);
+        R visitGetExpr(Get expr);
 
         R visitGroupingExpr(Grouping expr);
 
@@ -21,11 +21,11 @@ abstract class Expr {
 
         R visitLogicalExpr(Logical expr);
 
-        // R visitSetExpr(Set expr);
+        R visitSetExpr(Set expr);
 
         // R visitSuperExpr(Super expr);
 
-        // R visitThisExpr(This expr);
+        R visitThisExpr(This expr);
 
         R visitUnaryExpr(Unary expr);
 
@@ -93,20 +93,20 @@ abstract class Expr {
     /**
      * Get expression
      */
-    // static class Get extends Expr {
-    // Get(Expr object, Token name) {
-    // this.object = object;
-    // this.name = name;
-    // }
+    static class Get extends Expr {
+        Get(Expr object, Token name) {
+            this.object = object;
+            this.name = name;
+        }
 
-    // @Override
-    // <R> R accept(Visitor<R> visitor) {
-    // return visitor.visitGetExpr(this);
-    // }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitGetExpr(this);
+        }
 
-    // final Expr object;
-    // final Token name;
-    // }
+        final Expr object;
+        final Token name;
+    }
 
     /**
      * Grouping expression
@@ -163,22 +163,22 @@ abstract class Expr {
     /**
      * Set expression
      */
-    // static class Set extends Expr {
-    // Set(Expr object, Token name, Expr value) {
-    // this.object = object;
-    // this.name = name;
-    // this.value = value;
-    // }
+    static class Set extends Expr {
+        Set(Expr object, Token name, Expr value) {
+            this.object = object;
+            this.name = name;
+            this.value = value;
+        }
 
-    // @Override
-    // <R> R accept(Visitor<R> visitor) {
-    // return visitor.visitSetExpr(this);
-    // }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitSetExpr(this);
+        }
 
-    // final Expr object;
-    // final Token name;
-    // final Expr value;
-    // }
+        final Expr object;
+        final Token name;
+        final Expr value;
+    }
 
     /**
      * Super expression
@@ -201,18 +201,18 @@ abstract class Expr {
     // /**
     // * This expression
     // */
-    // static class This extends Expr {
-    // This(Token keyword) {
-    // this.keyword = keyword;
-    // }
+    static class This extends Expr {
+        This(Token keyword) {
+            this.keyword = keyword;
+        }
 
-    // @Override
-    // <R> R accept(Visitor<R> visitor) {
-    // return visitor.visitThisExpr(this);
-    // }
+        @Override
+        <R> R accept(Visitor<R> visitor) {
+            return visitor.visitThisExpr(this);
+        }
 
-    // final Token keyword;
-    // }
+        final Token keyword;
+    }
 
     /**
      * Unary expression
