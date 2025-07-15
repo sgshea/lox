@@ -4,9 +4,9 @@ use crate::{
 };
 
 /// Virtual machine for executing bytecode instructions
-pub struct VirtualMachine<'a> {
+pub struct VirtualMachine {
     // The chunk of bytecode instructions and constants
-    chunk: &'a Chunk,
+    chunk: Chunk,
     // The current instruction pointer
     ip: usize,
     // Stack of values
@@ -16,8 +16,17 @@ pub struct VirtualMachine<'a> {
     debug: bool,
 }
 
-impl<'a> VirtualMachine<'a> {
-    pub fn new(chunk: &'a Chunk, debug: bool) -> Self {
+impl VirtualMachine {
+    pub fn new() -> Self {
+        Self {
+            chunk: Chunk::new(),
+            ip: 0,
+            stack: Vec::new(),
+            debug: false,
+        }
+    }
+
+    pub fn new_from_chunk(chunk: Chunk, debug: bool) -> Self {
         Self {
             chunk,
             ip: 0,
@@ -121,8 +130,8 @@ impl<'a> VirtualMachine<'a> {
     /// Interprets the entire chunk of bytecode instructions
     /// @param chunk The chunk of bytecode instructions and constants
     /// @return Result indicating if the chunk was successfully interpreted
-    pub fn interpret(chunk: &'a Chunk) -> Result<(), LoxError> {
-        let mut vm = Self::new(chunk, true);
+    pub fn interpret(chunk: Chunk) -> Result<(), LoxError> {
+        let mut vm = Self::new_from_chunk(chunk, true);
         loop {
             match vm.interpret_next() {
                 Ok(true) => continue,
