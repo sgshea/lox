@@ -20,6 +20,7 @@ pub enum Instruction {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
+    Placeholder,
 }
 
 /// Chunk of bytecode instructions and constants
@@ -80,6 +81,16 @@ impl Chunk {
     // @return The instruction at the given index, or None if the index is out of bounds
     pub fn instruction(&self, index: usize) -> Option<&Instruction> {
         self.code.get(index)
+    }
+
+    /// Emits a sequence of bytes to the chunk at the given line.
+    /// @param chunk The chunk to write the bytes to
+    /// @param line The line number to associate with the bytes
+    /// @param bytes The bytes to emit
+    pub fn emit_bytes(&mut self, line: usize, bytes: &[Instruction]) {
+        for byte in bytes {
+            self.write(*byte, line);
+        }
     }
 }
 

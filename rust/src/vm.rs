@@ -1,4 +1,5 @@
 use crate::{
+    LoxResult,
     chunk::{Chunk, Instruction::*, Value},
     error::LoxError,
 };
@@ -130,13 +131,13 @@ impl VirtualMachine {
     /// Interprets the entire chunk of bytecode instructions
     /// @param chunk The chunk of bytecode instructions and constants
     /// @return Result indicating if the chunk was successfully interpreted
-    pub fn interpret(chunk: Chunk) -> Result<(), LoxError> {
+    pub fn interpret(chunk: Chunk) -> LoxResult<Value> {
         let mut vm = Self::new_from_chunk(chunk, true);
         loop {
             match vm.interpret_next() {
                 Ok(true) => continue,
-                Ok(false) => return Ok(()),
-                Err(err) => return Err(err),
+                Ok(false) => return Ok(vm.pop()), // Return last value
+                Err(err) => return Err(vec![err]),
             }
         }
     }

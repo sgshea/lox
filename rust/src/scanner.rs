@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use miette::NamedSource;
+
+use crate::error::{LoxError, ParseError};
+
 /// Represents a token in the source code.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TokenType {
@@ -54,7 +58,7 @@ pub enum TokenType {
 }
 
 /// Represents a token in the source code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Token<'source> {
     /// The type of the token.
     pub kind: TokenType,
@@ -62,18 +66,43 @@ pub struct Token<'source> {
     pub lexeme: &'source str,
     /// The line number where the token starts.
     pub line: usize,
+    /// Span of the token (start and end on line)
+    pub span: (usize, usize),
 }
 
 impl<'source> Token<'source> {
-    fn make_token(kind: TokenType, lexeme: &'source str, line: usize) -> Self {
-        Token { kind, lexeme, line }
+    fn make_token(
+        kind: TokenType,
+        lexeme: &'source str,
+        line: usize,
+        start: usize,
+        end: usize,
+    ) -> Self {
+        Token {
+            kind,
+            lexeme,
+            line,
+            span: (start, end),
+        }
+    }
+
+    pub fn is_token(&self, kind: TokenType) -> bool {
+        self.kind == kind
+    }
+
+    pub fn to_error(&self, sourcename: &str, source: &'source str) -> LoxError {
+        ParseError::new(
+            NamedSource::new(sourcename, source.to_string()),
+            self.span.into(),
+        )
+        .into()
     }
 }
 
 /// Represents a scanner to turn source code into tokens.
 pub struct Scanner<'source> {
     /// The source code being scanned.
-    source: &'source str,
+    pub source: &'source str,
     /// The starting index of the current token.
     start: usize,
     /// The current index in the source code.
@@ -116,7 +145,7 @@ impl<'source> Scanner<'source> {
     /// Makes a token with the given kind, lexeme, and line number.
     fn make_token(&self, kind: TokenType) -> Token<'source> {
         let lexeme = &self.source[self.start..self.current];
-        Token::make_token(kind, lexeme, self.line)
+        Token::make_token(kind, lexeme, self.line, self.start, self.current)
     }
 
     /// Skips whitespace characters in the source code.
@@ -181,6 +210,7 @@ impl<'source> Scanner<'source> {
             kind: TokenType::Error,
             lexeme: message,
             line: self.line,
+            span: (self.start, self.current),
         }
     }
 
