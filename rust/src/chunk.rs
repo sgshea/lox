@@ -83,13 +83,13 @@ impl Chunk {
         self.code.get(index)
     }
 
-    /// Emits a sequence of bytes to the chunk at the given line.
-    /// @param chunk The chunk to write the bytes to
-    /// @param line The line number to associate with the bytes
-    /// @param bytes The bytes to emit
-    pub fn emit_bytes(&mut self, line: usize, bytes: &[Instruction]) {
-        for byte in bytes {
-            self.write(*byte, line);
+    /// Emits a sequence of instructions to the chunk at the given line.
+    /// @param chunk The chunk to write the instructions to
+    /// @param line The line number to associate with the instructions
+    /// @param instructions The instructions to emit
+    pub fn emit_instructions(&mut self, line: usize, instructions: &[Instruction]) {
+        for instruction in instructions {
+            self.write(*instruction, line);
         }
     }
 }

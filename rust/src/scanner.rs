@@ -1,9 +1,5 @@
 use std::collections::HashMap;
 
-use miette::NamedSource;
-
-use crate::error::{LoxError, ParseError};
-
 /// Represents a token in the source code.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TokenType {
@@ -89,14 +85,6 @@ impl<'source> Token<'source> {
     pub fn is_token(&self, kind: TokenType) -> bool {
         self.kind == kind
     }
-
-    pub fn to_error(&self, sourcename: &str, source: &'source str) -> LoxError {
-        ParseError::new(
-            NamedSource::new(sourcename, source.to_string()),
-            self.span.into(),
-        )
-        .into()
-    }
 }
 
 /// Represents a scanner to turn source code into tokens.
@@ -180,6 +168,19 @@ impl<'source> Scanner<'source> {
         c
     }
 
+    fn match_char(&mut self, expected: u8) -> bool {
+        if self.current >= self.source.len() {
+            return false;
+        }
+
+        if self.source.as_bytes()[self.current] != expected {
+            return false;
+        }
+
+        self.current += 1;
+        true
+    }
+
     /// Peeks at the next character in the source code.
     fn peek(&self) -> u8 {
         if self.current >= self.source.len() {
@@ -259,10 +260,34 @@ impl<'source> Scanner<'source> {
             b'+' => self.make_token(TokenType::Plus),
             b'/' => self.make_token(TokenType::Slash),
             b'*' => self.make_token(TokenType::Star),
-            b'!' => self.make_token(TokenType::Bang),
-            b'=' => self.make_token(TokenType::Equal),
-            b'<' => self.make_token(TokenType::Less),
-            b'>' => self.make_token(TokenType::Greater),
+            b'!' => {
+                if self.match_char(b'=') {
+                    self.make_token(TokenType::BangEqual)
+                } else {
+                    self.make_token(TokenType::Bang)
+                }
+            }
+            b'=' => {
+                if self.match_char(b'=') {
+                    self.make_token(TokenType::EqualEqual)
+                } else {
+                    self.make_token(TokenType::Equal)
+                }
+            }
+            b'<' => {
+                if self.match_char(b'=') {
+                    self.make_token(TokenType::LessEqual)
+                } else {
+                    self.make_token(TokenType::Less)
+                }
+            }
+            b'>' => {
+                if self.match_char(b'=') {
+                    self.make_token(TokenType::GreaterEqual)
+                } else {
+                    self.make_token(TokenType::Greater)
+                }
+            }
             b'"' => {
                 self.string();
                 self.make_token(TokenType::String)

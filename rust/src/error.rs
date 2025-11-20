@@ -15,17 +15,23 @@ pub enum LoxError {
 }
 
 #[derive(Error, Debug, Diagnostic)]
-#[error("oops!")]
+#[error("{message}")]
 pub struct ParseError {
     #[source_code]
     src: NamedSource<String>,
     // Snippets and highlights can be included in the diagnostic!
-    #[label("This bit here")]
+    #[label("Here")]
     bad_bit: SourceSpan,
+
+    message: String,
 }
 
 impl ParseError {
-    pub fn new(src: NamedSource<String>, bad_bit: SourceSpan) -> Self {
-        Self { src, bad_bit }
+    pub fn new(src: NamedSource<String>, bad_bit: SourceSpan, message: impl Into<String>) -> Self {
+        Self {
+            src,
+            bad_bit,
+            message: message.into(),
+        }
     }
 }

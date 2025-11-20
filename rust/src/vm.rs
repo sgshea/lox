@@ -56,7 +56,7 @@ impl VirtualMachine {
         match instruction {
             Return => {
                 let value = self.pop();
-                println!("Return value: {:?}", value);
+                self.stack.push(value);
                 return Ok(false);
             }
             Constant(idx) => {
@@ -132,7 +132,7 @@ impl VirtualMachine {
     /// @param chunk The chunk of bytecode instructions and constants
     /// @return Result indicating if the chunk was successfully interpreted
     pub fn interpret(chunk: Chunk) -> LoxResult<Value> {
-        let mut vm = Self::new_from_chunk(chunk, true);
+        let mut vm = Self::new_from_chunk(chunk, false);
         loop {
             match vm.interpret_next() {
                 Ok(true) => continue,
