@@ -70,12 +70,7 @@ impl ParseRule {
                 infix: Some(binary),
                 precedence: Precedence::Term,
             },
-            Slash => Self {
-                prefix: None,
-                infix: Some(binary),
-                precedence: Precedence::Factor,
-            },
-            Star => Self {
+            Slash | Star => Self {
                 prefix: None,
                 infix: Some(binary),
                 precedence: Precedence::Factor,
@@ -84,6 +79,26 @@ impl ParseRule {
                 prefix: Some(number),
                 infix: None,
                 precedence: Precedence::Primary,
+            },
+            False | True | Nil => Self {
+                prefix: Some(literal),
+                infix: None,
+                precedence: Precedence::Primary,
+            },
+            Bang => Self {
+                prefix: Some(unary),
+                infix: None,
+                precedence: Precedence::None,
+            },
+            BangEqual | EqualEqual => Self {
+                prefix: None,
+                infix: Some(binary),
+                precedence: Precedence::Equality,
+            },
+            Greater | GreaterEqual | Less | LessEqual => Self {
+                prefix: None,
+                infix: Some(binary),
+                precedence: Precedence::Comparison,
             },
             _ => Self {
                 prefix: None,
@@ -240,6 +255,9 @@ fn unary(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
         TokenType::Minus => {
             chunk.write(Instruction::Negate, operator.line);
         }
+        TokenType::Bang => {
+            chunk.write(Instruction::Not, operator.line);
+        }
         _ => parser.error_at_previous("Unsupported unary operator."),
     }
 }
@@ -262,6 +280,42 @@ fn binary(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
         TokenType::Slash => {
             chunk.write(Instruction::Div, operator.line);
         }
+        TokenType::EqualEqual => {
+            chunk.write(Instruction::Equal, operator.line);
+        }
+        TokenType::BangEqual => {
+            chunk.write(Instruction::Equal, operator.line);
+            chunk.write(Instruction::Not, operator.line);
+        }
+        TokenType::Greater => {
+            chunk.write(Instruction::Greater, operator.line);
+        }
+        TokenType::GreaterEqual => {
+            chunk.write(Instruction::Less, operator.line);
+            chunk.write(Instruction::Not, operator.line);
+        }
+        TokenType::Less => {
+            chunk.write(Instruction::Less, operator.line);
+        }
+        TokenType::LessEqual => {
+            chunk.write(Instruction::Greater, operator.line);
+            chunk.write(Instruction::Not, operator.line);
+        }
         _ => parser.error_at_previous("Unsupported binary operator."),
+    }
+}
+
+fn literal(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+    match parser.previous.kind {
+        TokenType::False => {
+            chunk.write_constant(Value::Bool(false), parser.previous.line);
+        }
+        TokenType::True => {
+            chunk.write_constant(Value::Bool(true), parser.previous.line);
+        }
+        TokenType::Nil => {
+            chunk.write_constant(Value::Nil, parser.previous.line);
+        }
+        _ => parser.error_at_previous("Unsupported literal."),
     }
 }

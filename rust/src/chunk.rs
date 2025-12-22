@@ -14,13 +14,23 @@ pub enum Instruction {
     Sub,
     Mul,
     Div,
+    // Literal values
+    Nil,
+    True,
+    False,
+    Not,
+    // Equality operations
+    Equal,
+    Greater,
+    Less,
 }
 
 /// Values of the language
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
-    Placeholder,
+    Bool(bool),
+    Nil,
 }
 
 /// Chunk of bytecode instructions and constants

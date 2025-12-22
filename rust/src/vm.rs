@@ -18,15 +18,6 @@ pub struct VirtualMachine {
 }
 
 impl VirtualMachine {
-    pub fn new() -> Self {
-        Self {
-            chunk: Chunk::new(),
-            ip: 0,
-            stack: Vec::new(),
-            debug: false,
-        }
-    }
-
     pub fn new_from_chunk(chunk: Chunk, debug: bool) -> Self {
         Self {
             chunk,
@@ -56,7 +47,7 @@ impl VirtualMachine {
         match instruction {
             Return => {
                 let value = self.pop();
-                self.stack.push(value);
+                self.push(value);
                 return Ok(false);
             }
             Constant(idx) => {
@@ -65,13 +56,13 @@ impl VirtualMachine {
                     .chunk
                     .constant(*idx)
                     .ok_or(LoxError::RuntimeError("No such constant.".into()))?;
-                self.stack.push(*constant);
+                self.push(*constant);
             }
             Negate => {
                 // Negates a number
                 let value = self.pop();
                 match value {
-                    Value::Number(num) => self.stack.push(Value::Number(-num)),
+                    Value::Number(num) => self.push(Value::Number(-num)),
                     _ => return Err(LoxError::RuntimeError("Operand must be a number.".into())),
                 }
             }
@@ -81,7 +72,7 @@ impl VirtualMachine {
                 let left = self.pop();
                 match (left, right) {
                     (Value::Number(left), Value::Number(right)) => {
-                        self.stack.push(Value::Number(left + right))
+                        self.push(Value::Number(left + right))
                     }
                     _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
                 }
@@ -92,7 +83,7 @@ impl VirtualMachine {
                 let left = self.pop();
                 match (left, right) {
                     (Value::Number(left), Value::Number(right)) => {
-                        self.stack.push(Value::Number(left - right))
+                        self.push(Value::Number(left - right))
                     }
                     _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
                 }
@@ -103,7 +94,7 @@ impl VirtualMachine {
                 let left = self.pop();
                 match (left, right) {
                     (Value::Number(left), Value::Number(right)) => {
-                        self.stack.push(Value::Number(left * right))
+                        self.push(Value::Number(left * right))
                     }
                     _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
                 }
@@ -114,7 +105,39 @@ impl VirtualMachine {
                 let left = self.pop();
                 match (left, right) {
                     (Value::Number(left), Value::Number(right)) => {
-                        self.stack.push(Value::Number(left / right))
+                        self.push(Value::Number(left / right))
+                    }
+                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                }
+            }
+            Nil => self.push(Value::Nil),
+            True => self.push(Value::Bool(true)),
+            False => self.push(Value::Bool(false)),
+            Not => {
+                let value = self.pop();
+                self.push(Value::Bool(Self::is_falsey(value)));
+            }
+            Equal => {
+                let right = self.pop();
+                let left = self.pop();
+                self.push(Value::Bool(Self::values_equal(left, right)));
+            }
+            Greater => {
+                let right = self.pop();
+                let left = self.pop();
+                match (left, right) {
+                    (Value::Number(left), Value::Number(right)) => {
+                        self.push(Value::Bool(left > right))
+                    }
+                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                }
+            }
+            Less => {
+                let right = self.pop();
+                let left = self.pop();
+                match (left, right) {
+                    (Value::Number(left), Value::Number(right)) => {
+                        self.push(Value::Bool(left < right))
                     }
                     _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
                 }
@@ -152,5 +175,29 @@ impl VirtualMachine {
     /// @return The value popped from the stack
     pub fn pop(&mut self) -> Value {
         self.stack.pop().unwrap()
+    }
+
+    /// Determines if a value is "falsey" (i.e., evaluates to false in a boolean context)
+    /// @param value The value to check
+    /// @return True if the value is falsey, false otherwise
+    pub fn is_falsey(value: Value) -> bool {
+        match value {
+            Value::Nil => true,
+            Value::Bool(b) => !b,
+            _ => false,
+        }
+    }
+
+    /// Compares two values for equality
+    /// @param left The left value
+    /// @param right The right value
+    /// @return True if the values are equal, false otherwise
+    pub fn values_equal(left: Value, right: Value) -> bool {
+        match (left, right) {
+            (Value::Number(l), Value::Number(r)) => l == r,
+            (Value::Bool(l), Value::Bool(r)) => l == r,
+            (Value::Nil, Value::Nil) => true,
+            _ => false,
+        }
     }
 }
