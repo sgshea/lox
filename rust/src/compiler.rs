@@ -4,6 +4,7 @@ use crate::{
     LoxError, LoxResult,
     chunk::{Chunk, Instruction, Value},
     error::ParseError,
+    object::StringInterner,
     scanner::{Scanner, Token, TokenType},
 };
 
@@ -80,6 +81,11 @@ impl ParseRule {
                 infix: None,
                 precedence: Precedence::Primary,
             },
+            String => Self {
+                prefix: Some(string),
+                infix: None,
+                precedence: Precedence::Primary,
+            },
             False | True | Nil => Self {
                 prefix: Some(literal),
                 infix: None,
@@ -117,6 +123,7 @@ pub struct Parser<'source> {
     pub previous: Token<'source>,
 
     pub errors: Vec<LoxError>,
+    pub interner: StringInterner,
 }
 
 impl<'source> Parser<'source> {
@@ -127,6 +134,7 @@ impl<'source> Parser<'source> {
             current: Self::sentinel_token(),
             previous: Self::sentinel_token(),
             errors: Vec::new(),
+            interner: StringInterner::new(),
         }
     }
 
@@ -303,6 +311,16 @@ fn binary(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
         }
         _ => parser.error_at_previous("Unsupported binary operator."),
     }
+}
+
+fn string(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+    let lexeme = parser.previous.lexeme;
+    // Remove surrounding quotes
+    let string_content = &lexeme[1..lexeme.len() - 1];
+    // Intern the string
+    let interned = parser.interner.intern(string_content);
+    // Write as constant
+    chunk.write_constant(Value::String(interned), parser.previous.line);
 }
 
 fn literal(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {

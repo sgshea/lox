@@ -1,7 +1,9 @@
+use std::fmt;
 use crate::{
     LoxResult,
     chunk::{Chunk, Instruction::*, Value},
     error::LoxError,
+    object::StringInterner,
 };
 
 /// Virtual machine for executing bytecode instructions
@@ -12,6 +14,8 @@ pub struct VirtualMachine {
     ip: usize,
     // Stack of values
     stack: Vec<Value>,
+    // String interner for deduplicating strings
+    interner: StringInterner,
 
     // Indicates if the virtual machine is in debug mode
     debug: bool,
@@ -23,6 +27,7 @@ impl VirtualMachine {
             chunk,
             ip: 0,
             stack: Vec::new(),
+            interner: StringInterner::new(),
             debug,
         }
     }
@@ -56,7 +61,7 @@ impl VirtualMachine {
                     .chunk
                     .constant(*idx)
                     .ok_or(LoxError::RuntimeError("No such constant.".into()))?;
-                self.push(*constant);
+                self.push(constant.clone());
             }
             Negate => {
                 // Negates a number
@@ -67,21 +72,26 @@ impl VirtualMachine {
                 }
             }
             Add => {
-                // Adds two numbers
+                // Adds two numbers or concatenates two strings
                 let right = self.pop();
                 let left = self.pop();
-                match (left, right) {
+                match (&left, &right) {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left + right))
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                    (Value::String(left), Value::String(right)) => {
+                        let concatenated = format!("{}{}", left, right);
+                        let interned = self.interner.intern(&concatenated);
+                        self.push(Value::String(interned));
+                    }
+                    _ => return Err(LoxError::RuntimeError("Operands must be two numbers or two strings.".into())),
                 }
             }
             Sub => {
                 // Subtracts two numbers
                 let right = self.pop();
                 let left = self.pop();
-                match (left, right) {
+                match (&left, &right) {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left - right))
                     }
@@ -92,7 +102,7 @@ impl VirtualMachine {
                 // Multiplies two numbers
                 let right = self.pop();
                 let left = self.pop();
-                match (left, right) {
+                match (&left, &right) {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left * right))
                     }
@@ -103,7 +113,7 @@ impl VirtualMachine {
                 // Divides two numbers
                 let right = self.pop();
                 let left = self.pop();
-                match (left, right) {
+                match (&left, &right) {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left / right))
                     }
@@ -115,17 +125,17 @@ impl VirtualMachine {
             False => self.push(Value::Bool(false)),
             Not => {
                 let value = self.pop();
-                self.push(Value::Bool(Self::is_falsey(value)));
+                self.push(Value::Bool(Self::is_falsey(&value)));
             }
             Equal => {
                 let right = self.pop();
                 let left = self.pop();
-                self.push(Value::Bool(Self::values_equal(left, right)));
+                self.push(Value::Bool(Self::values_equal(&left, &right)));
             }
             Greater => {
                 let right = self.pop();
                 let left = self.pop();
-                match (left, right) {
+                match (&left, &right) {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Bool(left > right))
                     }
@@ -135,7 +145,7 @@ impl VirtualMachine {
             Less => {
                 let right = self.pop();
                 let left = self.pop();
-                match (left, right) {
+                match (&left, &right) {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Bool(left < right))
                     }
@@ -180,7 +190,7 @@ impl VirtualMachine {
     /// Determines if a value is "falsey" (i.e., evaluates to false in a boolean context)
     /// @param value The value to check
     /// @return True if the value is falsey, false otherwise
-    pub fn is_falsey(value: Value) -> bool {
+    pub fn is_falsey(value: &Value) -> bool {
         match value {
             Value::Nil => true,
             Value::Bool(b) => !b,
@@ -192,12 +202,31 @@ impl VirtualMachine {
     /// @param left The left value
     /// @param right The right value
     /// @return True if the values are equal, false otherwise
-    pub fn values_equal(left: Value, right: Value) -> bool {
+    pub fn values_equal(left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Number(l), Value::Number(r)) => l == r,
             (Value::Bool(l), Value::Bool(r)) => l == r,
             (Value::Nil, Value::Nil) => true,
+            (Value::String(l), Value::String(r)) => l == r,
             _ => false,
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Number(n) => {
+                // Print numbers without trailing .0 if they're integers
+                if n.fract() == 0.0 {
+                    write!(f, "{}", *n as i64)
+                } else {
+                    write!(f, "{}", n)
+                }
+            }
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Nil => write!(f, "nil"),
+            Value::String(s) => write!(f, "{}", s),
         }
     }
 }

@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::rc::Rc;
 
 /// Op code instructions
 #[derive(Debug, Copy, Clone)]
@@ -26,11 +27,12 @@ pub enum Instruction {
 }
 
 /// Values of the language
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Number(f64),
     Bool(bool),
     Nil,
+    String(Rc<String>),
 }
 
 /// Chunk of bytecode instructions and constants

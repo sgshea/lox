@@ -1,6 +1,7 @@
 mod chunk;
 mod compiler;
 mod error;
+mod object;
 mod scanner;
 mod vm;
 
@@ -10,6 +11,7 @@ use crate::chunk::Chunk;
 pub use crate::chunk::Value;
 use crate::compiler::compile;
 pub use crate::error::LoxError;
+pub use crate::object::StringInterner;
 use crate::vm::VirtualMachine;
 
 /// Vector error type for the language

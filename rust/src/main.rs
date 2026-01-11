@@ -26,7 +26,7 @@ fn repl() {
         }
 
         match interpret(trimmed, "repl") {
-            Ok(value) => println!("{:?}", value),
+            Ok(value) => println!("{}", value),
             Err(errors) => {
                 for error in errors {
                     eprintln!("{:?}", error);
@@ -41,7 +41,7 @@ fn main() {
     match args.len() {
         1 => repl(),
         2 => match file(&args[1]) {
-            Ok(value) => println!("{:?}", value),
+            Ok(value) => println!("{}", value),
             Err(errors) => {
                 for error in errors {
                     eprintln!("{:?}", error);
