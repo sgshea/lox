@@ -1,0 +1,21 @@
+// Test basic variable assignment
+var breakfast = "beignets";
+var beverage = "cafe au lait";
+breakfast = "beignets with " + beverage;
+
+print breakfast;
+// Expected output: beignets with cafe au lait
+
+// Test reassignment
+var count = 1;
+print count;
+count = 2;
+print count;
+count = count + 1;
+print count;
+// Expected output: 1, 2, 3
+
+// Test nil default value
+var uninitialized;
+print uninitialized;
+// Expected output: nil

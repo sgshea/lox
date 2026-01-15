@@ -106,11 +106,38 @@ impl ParseRule {
                 infix: Some(binary),
                 precedence: Precedence::Comparison,
             },
+            Identifier => Self {
+                prefix: Some(variable),
+                infix: None,
+                precedence: Precedence::None,
+            },
             _ => Self {
                 prefix: None,
                 infix: None,
                 precedence: Precedence::None,
             },
+        }
+    }
+}
+
+/// Represents a local variable in the compiler
+#[derive(Clone)]
+struct Local<'source> {
+    name: Token<'source>,
+    depth: i32,
+}
+
+/// Compiler state for tracking local variables and scope
+struct Compiler<'source> {
+    locals: Vec<Local<'source>>,
+    scope_depth: i32,
+}
+
+impl<'source> Compiler<'source> {
+    fn new() -> Self {
+        Self {
+            locals: Vec::new(),
+            scope_depth: 0,
         }
     }
 }
@@ -124,6 +151,8 @@ pub struct Parser<'source> {
 
     pub errors: Vec<LoxError>,
     pub interner: StringInterner,
+
+    compiler: Compiler<'source>,
 }
 
 impl<'source> Parser<'source> {
@@ -135,6 +164,7 @@ impl<'source> Parser<'source> {
             previous: Self::sentinel_token(),
             errors: Vec::new(),
             interner: StringInterner::new(),
+            compiler: Compiler::new(),
         }
     }
 
@@ -169,8 +199,215 @@ impl<'source> Parser<'source> {
         }
     }
 
+    fn check(&self, kind: TokenType) -> bool {
+        self.current.is_token(kind)
+    }
+
+    fn match_token(&mut self, kind: TokenType) -> bool {
+        if !self.check(kind) {
+            return false;
+        }
+        self.advance();
+        true
+    }
+
     fn expression(&mut self, chunk: &mut Chunk) {
         self.parse_precedence(chunk, Precedence::Assignment);
+    }
+
+    fn declaration(&mut self, chunk: &mut Chunk) {
+        if self.match_token(TokenType::Var) {
+            self.var_declaration(chunk);
+        } else {
+            self.statement(chunk);
+        }
+
+        // Synchronize on errors
+        if !self.errors.is_empty() {
+            self.synchronize();
+        }
+    }
+
+    fn var_declaration(&mut self, chunk: &mut Chunk) {
+        let global = self.parse_variable(chunk, "Expect variable name.");
+
+        if self.match_token(TokenType::Equal) {
+            self.expression(chunk);
+        } else {
+            chunk.write(Instruction::Nil, self.previous.line);
+        }
+
+        self.consume(TokenType::Semicolon, "Expect ';' after variable declaration.");
+        self.define_variable(chunk, global);
+    }
+
+    fn parse_variable(&mut self, chunk: &mut Chunk, error_message: &str) -> usize {
+        self.consume(TokenType::Identifier, error_message);
+
+        self.declare_variable();
+        if self.compiler.scope_depth > 0 {
+            return 0;
+        }
+
+        self.identifier_constant(chunk, self.previous)
+    }
+
+    fn identifier_constant(&mut self, chunk: &mut Chunk, name: Token<'source>) -> usize {
+        let interned = self.interner.intern(name.lexeme);
+        chunk.add_constant(Value::String(interned))
+    }
+
+    fn declare_variable(&mut self) {
+        if self.compiler.scope_depth == 0 {
+            return;
+        }
+
+        let name = self.previous;
+
+        // Check for duplicate local variable in same scope
+        let mut has_duplicate = false;
+        for local in self.compiler.locals.iter().rev() {
+            if local.depth != -1 && local.depth < self.compiler.scope_depth {
+                break;
+            }
+
+            if Self::identifiers_equal(&name, &local.name) {
+                has_duplicate = true;
+                break;
+            }
+        }
+
+        if has_duplicate {
+            self.error_at_previous("Already a variable with this name in this scope.");
+        }
+
+        self.add_local(name);
+    }
+
+    fn identifiers_equal(a: &Token, b: &Token) -> bool {
+        a.lexeme == b.lexeme
+    }
+
+    fn add_local(&mut self, name: Token<'source>) {
+        let local = Local { name, depth: -1 }; // -1 marks uninitialized
+        self.compiler.locals.push(local);
+    }
+
+    fn define_variable(&mut self, chunk: &mut Chunk, global: usize) {
+        if self.compiler.scope_depth > 0 {
+            self.mark_initialized();
+            return;
+        }
+
+        chunk.write(Instruction::DefineGlobal(global), self.previous.line);
+    }
+
+    fn mark_initialized(&mut self) {
+        if self.compiler.scope_depth == 0 {
+            return;
+        }
+        if let Some(local) = self.compiler.locals.last_mut() {
+            local.depth = self.compiler.scope_depth;
+        }
+    }
+
+    fn statement(&mut self, chunk: &mut Chunk) {
+        if self.match_token(TokenType::Print) {
+            self.print_statement(chunk);
+        } else if self.match_token(TokenType::LeftBrace) {
+            self.begin_scope();
+            self.block(chunk);
+            self.end_scope(chunk);
+        } else {
+            self.expression_statement(chunk);
+        }
+    }
+
+    fn print_statement(&mut self, chunk: &mut Chunk) {
+        self.expression(chunk);
+        self.consume(TokenType::Semicolon, "Expect ';' after value.");
+        chunk.write(Instruction::Print, self.previous.line);
+    }
+
+    fn expression_statement(&mut self, chunk: &mut Chunk) {
+        self.expression(chunk);
+        self.consume(TokenType::Semicolon, "Expect ';' after expression.");
+        chunk.write(Instruction::Pop, self.previous.line);
+    }
+
+    fn block(&mut self, chunk: &mut Chunk) {
+        while !self.check(TokenType::RightBrace) && !self.check(TokenType::Eof) {
+            self.declaration(chunk);
+        }
+
+        self.consume(TokenType::RightBrace, "Expect '}' after block.");
+    }
+
+    fn begin_scope(&mut self) {
+        self.compiler.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self, chunk: &mut Chunk) {
+        self.compiler.scope_depth -= 1;
+
+        // Pop all locals from this scope
+        while !self.compiler.locals.is_empty()
+            && self.compiler.locals.last().unwrap().depth > self.compiler.scope_depth
+        {
+            chunk.write(Instruction::Pop, self.previous.line);
+            self.compiler.locals.pop();
+        }
+    }
+
+    fn synchronize(&mut self) {
+        while !self.current.is_token(TokenType::Eof) {
+            if self.previous.is_token(TokenType::Semicolon) {
+                return;
+            }
+
+            match self.current.kind {
+                TokenType::Class
+                | TokenType::Fun
+                | TokenType::Var
+                | TokenType::For
+                | TokenType::If
+                | TokenType::While
+                | TokenType::Print
+                | TokenType::Return => return,
+                _ => {}
+            }
+
+            self.advance();
+        }
+    }
+
+    fn named_variable(&mut self, chunk: &mut Chunk, name: Token<'source>, can_assign: bool) {
+        let (get_op, set_op) = match self.resolve_local(&name) {
+            Some(slot) => (Instruction::GetLocal(slot), Instruction::SetLocal(slot)),
+            None => {
+                let arg = self.identifier_constant(chunk, name);
+                (Instruction::GetGlobal(arg), Instruction::SetGlobal(arg))
+            }
+        };
+
+        if can_assign && self.match_token(TokenType::Equal) {
+            self.expression(chunk);
+            chunk.write(set_op, self.previous.line);
+        } else {
+            chunk.write(get_op, self.previous.line);
+        }
+    }
+
+    fn resolve_local(&mut self, name: &Token) -> Option<usize> {
+        for (i, local) in self.compiler.locals.iter().enumerate().rev() {
+            if Self::identifiers_equal(name, &local.name) {
+                if local.depth == -1 {
+                    self.error_at_previous("Can't read local variable in its own initializer.");
+                }
+                return Some(i);
+            }
+        }
+        None
     }
 
     fn parse_precedence(&mut self, chunk: &mut Chunk, precedence: Precedence) {
@@ -218,15 +455,13 @@ impl<'source> Parser<'source> {
 }
 
 /// Compiles the given source code into bytecode and writes it to the provided chunk.
-/// Currently, only single expressions are supported (Chapter 17).
 pub fn compile(source: &str, source_name: &str, chunk: &mut Chunk) -> LoxResult<()> {
     let mut parser = Parser::new(source, source_name);
 
     parser.advance();
-    parser.expression(chunk);
 
-    if parser.current.is_token(TokenType::Semicolon) {
-        parser.advance();
+    while !parser.current.is_token(TokenType::Eof) {
+        parser.declaration(chunk);
     }
 
     parser.consume(TokenType::Eof, "Expect end of expression.");
@@ -336,4 +571,9 @@ fn literal(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
         }
         _ => parser.error_at_previous("Unsupported literal."),
     }
+}
+
+fn variable(parser: &mut Parser<'_>, chunk: &mut Chunk, can_assign: bool) {
+    let name = parser.previous;
+    parser.named_variable(chunk, name, can_assign);
 }

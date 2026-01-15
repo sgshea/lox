@@ -1,0 +1,20 @@
+// Test error cases for global variables
+// Uncomment each section individually to test errors
+
+// Error: Undefined variable access
+// print undefined_var;
+
+// Error: Assignment to undefined variable
+// undefined = 42;
+
+// Error: Invalid assignment target
+// (1 + 2) = 3;
+
+// Error: a * b = c (not a valid target)
+// var a = 1;
+// var b = 2;
+// a * b = 3;
+
+// Valid: This should work
+var valid = "this works";
+print valid;

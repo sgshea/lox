@@ -24,6 +24,17 @@ pub enum Instruction {
     Equal,
     Greater,
     Less,
+    // Stack operations
+    Pop,
+    // Print statement
+    Print,
+    // Global variable operations
+    DefineGlobal(usize),
+    GetGlobal(usize),
+    SetGlobal(usize),
+    // Local variable operations
+    GetLocal(usize),
+    SetLocal(usize),
 }
 
 /// Values of the language

@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 use crate::{
     LoxResult,
     chunk::{Chunk, Instruction::*, Value},
@@ -16,6 +18,8 @@ pub struct VirtualMachine {
     stack: Vec<Value>,
     // String interner for deduplicating strings
     interner: StringInterner,
+    // Global variables table
+    globals: HashMap<Rc<String>, Value>,
 
     // Indicates if the virtual machine is in debug mode
     debug: bool,
@@ -28,6 +32,7 @@ impl VirtualMachine {
             ip: 0,
             stack: Vec::new(),
             interner: StringInterner::new(),
+            globals: HashMap::new(),
             debug,
         }
     }
@@ -51,9 +56,45 @@ impl VirtualMachine {
 
         match instruction {
             Return => {
-                let value = self.pop();
-                self.push(value);
                 return Ok(false);
+            }
+            Pop => {
+                self.pop();
+            }
+            Print => {
+                let value = self.pop();
+                println!("{}", value);
+            }
+            DefineGlobal(idx) => {
+                let name = self.read_string(*idx)?;
+                let value = self.pop();
+                self.globals.insert(name, value);
+            }
+            GetGlobal(idx) => {
+                let name = self.read_string(*idx)?;
+                let value = self.globals.get(&name).ok_or_else(|| {
+                    LoxError::RuntimeError(format!("Undefined variable '{}'.", name))
+                })?;
+                self.push(value.clone());
+            }
+            SetGlobal(idx) => {
+                let name = self.read_string(*idx)?;
+                if !self.globals.contains_key(&name) {
+                    return Err(LoxError::RuntimeError(format!(
+                        "Undefined variable '{}'.",
+                        name
+                    )));
+                }
+                let value = self.peek(0).clone();
+                self.globals.insert(name, value);
+            }
+            GetLocal(slot) => {
+                let value = self.stack[*slot].clone();
+                self.push(value);
+            }
+            SetLocal(slot) => {
+                let value = self.peek(0).clone();
+                self.stack[*slot] = value;
             }
             Constant(idx) => {
                 // Retrieves a constant value from the chunk and pushes it onto the stack
@@ -169,7 +210,10 @@ impl VirtualMachine {
         loop {
             match vm.interpret_next() {
                 Ok(true) => continue,
-                Ok(false) => return Ok(vm.pop()), // Return last value
+                Ok(false) => {
+                    // Return top of stack if available, otherwise nil
+                    return Ok(vm.stack.pop().unwrap_or(Value::Nil));
+                }
                 Err(err) => return Err(vec![err]),
             }
         }
@@ -185,6 +229,23 @@ impl VirtualMachine {
     /// @return The value popped from the stack
     pub fn pop(&mut self) -> Value {
         self.stack.pop().unwrap()
+    }
+
+    /// Peeks at a value on the stack at the given distance from the top
+    /// @param distance The distance from the top of the stack
+    /// @return A reference to the value at that position
+    pub fn peek(&self, distance: usize) -> &Value {
+        &self.stack[self.stack.len() - 1 - distance]
+    }
+
+    /// Reads a string constant from the chunk
+    /// @param idx The index of the constant
+    /// @return The string value
+    fn read_string(&self, idx: usize) -> Result<Rc<String>, LoxError> {
+        match self.chunk.constant(idx) {
+            Some(Value::String(s)) => Ok(s.clone()),
+            _ => Err(LoxError::RuntimeError("Expected string constant.".into())),
+        }
     }
 
     /// Determines if a value is "falsey" (i.e., evaluates to false in a boolean context)

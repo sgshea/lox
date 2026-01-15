@@ -44,7 +44,7 @@ fn main() {
             Ok(value) => println!("{}", value),
             Err(errors) => {
                 for error in errors {
-                    eprintln!("{:?}", error);
+                    eprintln!("{:}", error);
                 }
             }
         },

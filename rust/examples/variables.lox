@@ -1,0 +1,38 @@
+// Test basic variable declaration with initializer
+var breakfast = "bagel";
+var beverage = "coffee";
+
+// Test variable access and string concatenation
+var meal = breakfast + " with " + beverage;
+print meal;
+
+// Test variable assignment
+breakfast = "croissants";
+print breakfast;
+
+// Test variable declaration without initializer (should be nil)
+var uninitialized;
+print uninitialized;
+
+// Test reassignment
+uninitialized = "now has a value";
+print uninitialized;
+
+// Test numeric variables
+var x = 10;
+var y = 20;
+print x + y;
+
+// Test variable in expression
+var a = 5;
+var b = a * 2;
+print b;
+
+// Test boolean variables
+var flag = true;
+print flag;
+
+// Test nil assignment
+var something = "hello";
+something = nil;
+print something;

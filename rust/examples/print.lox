@@ -1,0 +1,6 @@
+// Test basic print statement
+print 1 + 2;
+print "hello world";
+print true;
+print nil;
+print 3.14159;
