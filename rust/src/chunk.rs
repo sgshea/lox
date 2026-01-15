@@ -35,6 +35,10 @@ pub enum Instruction {
     // Local variable operations
     GetLocal(usize),
     SetLocal(usize),
+    // Control flow instructions
+    Jump(u16),        // Unconditional forward jump by offset
+    JumpIfFalse(u16), // Jump if top of stack is falsey (does not pop)
+    Loop(u16),        // Unconditional backward jump by offset
 }
 
 /// Values of the language

@@ -3,7 +3,7 @@ use std::fmt;
 use std::rc::Rc;
 use crate::{
     LoxResult,
-    chunk::{Chunk, Instruction::*, Value},
+    chunk::{Chunk, Instruction, Instruction::*, Value},
     error::LoxError,
     object::StringInterner,
 };
@@ -192,6 +192,17 @@ impl VirtualMachine {
                     }
                     _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
                 }
+            }
+            Instruction::Jump(offset) => {
+                self.ip += *offset as usize;
+            }
+            Instruction::JumpIfFalse(offset) => {
+                if Self::is_falsey(self.peek(0)) {
+                    self.ip += *offset as usize;
+                }
+            }
+            Instruction::Loop(offset) => {
+                self.ip -= *offset as usize;
             }
         };
 

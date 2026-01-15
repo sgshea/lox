@@ -61,6 +61,16 @@ impl ParseRule {
                 infix: None,
                 precedence: Precedence::Call,
             },
+            And => Self {
+                prefix: None,
+                infix: Some(and_),
+                precedence: Precedence::And,
+            },
+            Or => Self {
+                prefix: None,
+                infix: Some(or_),
+                precedence: Precedence::Or,
+            },
             Minus => Self {
                 prefix: Some(unary),
                 infix: Some(binary),
@@ -314,6 +324,12 @@ impl<'source> Parser<'source> {
     fn statement(&mut self, chunk: &mut Chunk) {
         if self.match_token(TokenType::Print) {
             self.print_statement(chunk);
+        } else if self.match_token(TokenType::If) {
+            self.if_statement(chunk);
+        } else if self.match_token(TokenType::While) {
+            self.while_statement(chunk);
+        } else if self.match_token(TokenType::For) {
+            self.for_statement(chunk);
         } else if self.match_token(TokenType::LeftBrace) {
             self.begin_scope();
             self.block(chunk);
@@ -357,6 +373,140 @@ impl<'source> Parser<'source> {
             chunk.write(Instruction::Pop, self.previous.line);
             self.compiler.locals.pop();
         }
+    }
+
+    /// Emits a jump instruction with a placeholder offset, returns the index of the instruction
+    fn emit_jump(&mut self, chunk: &mut Chunk, instruction: Instruction) -> usize {
+        chunk.write(instruction, self.previous.line)
+    }
+
+    /// Patches a previously emitted jump instruction with the correct offset
+    fn patch_jump(&mut self, chunk: &mut Chunk, offset: usize) {
+        // Calculate jump distance: from after the jump instruction to current position
+        let jump = chunk.code.len() - offset - 1;
+
+        if jump > u16::MAX as usize {
+            self.error_at_previous("Too much code to jump over.");
+            return;
+        }
+
+        // Update the instruction with the actual offset
+        match chunk.code[offset] {
+            Instruction::Jump(_) | Instruction::JumpIfFalse(_) => {
+                match &mut chunk.code[offset] {
+                    Instruction::Jump(o) | Instruction::JumpIfFalse(o) => {
+                        *o = jump as u16
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Emits a loop instruction that jumps backward to loop_start
+    fn emit_loop(&mut self, chunk: &mut Chunk, loop_start: usize) {
+        let offset = chunk.code.len() - loop_start + 1;
+
+        if offset > u16::MAX as usize {
+            self.error_at_previous("Loop body too large.");
+            return;
+        }
+
+        chunk.write(Instruction::Loop(offset as u16), self.previous.line);
+    }
+
+    fn if_statement(&mut self, chunk: &mut Chunk) {
+        self.consume(TokenType::LeftParen, "Expect '(' after 'if'.");
+        self.expression(chunk);
+        self.consume(TokenType::RightParen, "Expect ')' after condition.");
+
+        // Jump over the then branch if condition is falsey
+        let then_jump = self.emit_jump(chunk, Instruction::JumpIfFalse(0));
+        chunk.write(Instruction::Pop, self.previous.line); // Pop condition if true
+        self.statement(chunk);
+
+        // Jump over the else branch after executing then branch
+        let else_jump = self.emit_jump(chunk, Instruction::Jump(0));
+
+        self.patch_jump(chunk, then_jump);
+        chunk.write(Instruction::Pop, self.previous.line); // Pop condition if false
+
+        if self.match_token(TokenType::Else) {
+            self.statement(chunk);
+        }
+        self.patch_jump(chunk, else_jump);
+    }
+
+    fn while_statement(&mut self, chunk: &mut Chunk) {
+        let loop_start = chunk.code.len();
+
+        self.consume(TokenType::LeftParen, "Expect '(' after 'while'.");
+        self.expression(chunk);
+        self.consume(TokenType::RightParen, "Expect ')' after condition.");
+
+        // Jump past the body if condition is falsey
+        let exit_jump = self.emit_jump(chunk, Instruction::JumpIfFalse(0));
+        chunk.write(Instruction::Pop, self.previous.line); // Pop condition
+        self.statement(chunk);
+        self.emit_loop(chunk, loop_start);
+
+        self.patch_jump(chunk, exit_jump);
+        chunk.write(Instruction::Pop, self.previous.line); // Pop condition on exit
+    }
+
+    fn for_statement(&mut self, chunk: &mut Chunk) {
+        self.begin_scope();
+        self.consume(TokenType::LeftParen, "Expect '(' after 'for'.");
+
+        // Initializer clause
+        if self.match_token(TokenType::Semicolon) {
+            // No initializer
+        } else if self.match_token(TokenType::Var) {
+            self.var_declaration(chunk);
+        } else {
+            self.expression_statement(chunk);
+        }
+
+        let mut loop_start = chunk.code.len();
+
+        // Condition clause
+        let mut exit_jump = None;
+        if !self.match_token(TokenType::Semicolon) {
+            self.expression(chunk);
+            self.consume(TokenType::Semicolon, "Expect ';' after loop condition.");
+
+            // Jump out of the loop if condition is false
+            exit_jump = Some(self.emit_jump(chunk, Instruction::JumpIfFalse(0)));
+            chunk.write(Instruction::Pop, self.previous.line); // Pop condition
+        }
+
+        // Increment clause
+        if !self.match_token(TokenType::RightParen) {
+            // Jump over increment, run body, then come back
+            let body_jump = self.emit_jump(chunk, Instruction::Jump(0));
+            let increment_start = chunk.code.len();
+
+            self.expression(chunk);
+            chunk.write(Instruction::Pop, self.previous.line); // Pop increment result
+            self.consume(TokenType::RightParen, "Expect ')' after for clauses.");
+
+            self.emit_loop(chunk, loop_start);
+            loop_start = increment_start;
+            self.patch_jump(chunk, body_jump);
+        }
+
+        // Body
+        self.statement(chunk);
+        self.emit_loop(chunk, loop_start);
+
+        // Patch exit jump if there was a condition
+        if let Some(exit) = exit_jump {
+            self.patch_jump(chunk, exit);
+            chunk.write(Instruction::Pop, self.previous.line); // Pop condition on exit
+        }
+
+        self.end_scope(chunk);
     }
 
     fn synchronize(&mut self) {
@@ -578,4 +728,33 @@ fn literal(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
 fn variable(parser: &mut Parser<'_>, chunk: &mut Chunk, can_assign: bool) {
     let name = parser.previous;
     parser.named_variable(chunk, name, can_assign);
+}
+
+fn and_(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+    // Left operand is already on the stack
+    // Short-circuit: if falsey, skip right operand
+    let end_jump = parser.emit_jump(chunk, Instruction::JumpIfFalse(0));
+
+    chunk.write(Instruction::Pop, parser.previous.line); // Pop left operand if truthy
+    parser.parse_precedence(chunk, Precedence::And);
+
+    parser.patch_jump(chunk, end_jump);
+    // If we jumped, the falsey left operand is still on stack as the result
+    // If we didn't jump, the right operand is now on stack as the result
+}
+
+fn or_(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+    // Left operand already on the stack
+    // Short-circuit: if falsey, evaluate right; if truthy, skip right
+    let else_jump = parser.emit_jump(chunk, Instruction::JumpIfFalse(0));
+    let end_jump = parser.emit_jump(chunk, Instruction::Jump(0));
+
+    parser.patch_jump(chunk, else_jump);
+    chunk.write(Instruction::Pop, parser.previous.line); // Pop left operand if falsey
+
+    parser.parse_precedence(chunk, Precedence::Or);
+
+    parser.patch_jump(chunk, end_jump);
+    // If left truthy, we jumped to end with it still on stack
+    // If left falsey, we popped it and right operand is now on stack
 }

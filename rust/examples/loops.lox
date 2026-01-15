@@ -1,0 +1,13 @@
+for(var i = 0; i < 5; i = i + 1) {
+  print i;
+}
+
+while (false) {
+  print "This will not print.";
+}
+
+var count = 3;
+while (count >= 0) {
+  print count;
+  count = count - 1;
+}
