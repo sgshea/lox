@@ -446,9 +446,11 @@ impl<'source> Parser<'source> {
     }
 
     fn error_at(&mut self, token: Token<'source>, message: &str) {
+        let (start, end) = token.span;
+        let length = end.saturating_sub(start).max(1);
         self.errors.push(LoxError::ParseError(ParseError::new(
             NamedSource::new(self.source_name, self.scanner.source.to_string()),
-            token.span.into(),
+            (start, length).into(),
             message.to_string(),
         )));
     }

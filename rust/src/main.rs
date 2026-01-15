@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
 use lox_rust_vm::{LoxResult, Value, interpret};
+use miette::Report;
 
 fn file(path: &str) -> LoxResult<Value> {
     let source_code = std::fs::read_to_string(path).expect("Could not read file.");
@@ -29,7 +30,7 @@ fn repl() {
             Ok(value) => println!("{}", value),
             Err(errors) => {
                 for error in errors {
-                    eprintln!("{:?}", error);
+                    eprintln!("{:?}", Report::new(error));
                 }
             }
         }
@@ -44,7 +45,7 @@ fn main() {
             Ok(value) => println!("{}", value),
             Err(errors) => {
                 for error in errors {
-                    eprintln!("{:}", error);
+                    eprintln!("{:?}", Report::new(error));
                 }
             }
         },
