@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -7,7 +8,7 @@ use crate::{
     LoxResult,
     chunk::{Chunk, Instruction, Instruction::*, Value},
     error::LoxError,
-    object::{LoxFunction, NativeFunction, StringInterner},
+    object::{LoxClosure, LoxFunction, LoxUpvalue, NativeFunction, StringInterner},
 };
 
 /// Maximum number of call frames (stack depth)
@@ -15,18 +16,18 @@ const FRAMES_MAX: usize = 64;
 
 /// Represents a single function call's execution context
 struct CallFrame {
-    /// The function being executed
-    function: Rc<LoxFunction>,
-    /// Instruction pointer into the function's chunk
+    /// The closure being executed
+    closure: Rc<LoxClosure>,
+    /// Instruction pointer into the closure's function's chunk
     ip: usize,
     /// Base index into the VM's value stack for this frame's slots
     slot_offset: usize,
 }
 
 impl CallFrame {
-    fn new(function: Rc<LoxFunction>, slot_offset: usize) -> Self {
+    fn new(closure: Rc<LoxClosure>, slot_offset: usize) -> Self {
         Self {
-            function,
+            closure,
             ip: 0,
             slot_offset,
         }
@@ -34,7 +35,7 @@ impl CallFrame {
 
     /// Read the current instruction and advance ip
     fn read_instruction(&mut self) -> Option<&Instruction> {
-        let instruction = self.function.chunk.instruction(self.ip);
+        let instruction = self.closure.function.chunk.instruction(self.ip);
         if instruction.is_some() {
             self.ip += 1;
         }
@@ -43,7 +44,7 @@ impl CallFrame {
 
     /// Get the current chunk
     fn chunk(&self) -> &Chunk {
-        &self.function.chunk
+        &self.closure.function.chunk
     }
 }
 
@@ -57,6 +58,8 @@ pub struct VirtualMachine {
     interner: StringInterner,
     /// Global variables table
     globals: HashMap<Rc<String>, Value>,
+    /// Head of the open upvalues linked list (sorted by stack index, descending)
+    open_upvalues: Option<Rc<RefCell<LoxUpvalue>>>,
     /// Indicates if the virtual machine is in debug mode
     debug: bool,
 }
@@ -68,6 +71,7 @@ impl VirtualMachine {
             stack: Vec::new(),
             interner: StringInterner::new(),
             globals: HashMap::new(),
+            open_upvalues: None,
             debug,
         };
 
@@ -119,6 +123,9 @@ impl VirtualMachine {
                 let result = self.pop();
                 let frame = self.frames.pop().expect("No frame to pop");
 
+                // Close any remaining open upvalues for this frame
+                self.close_upvalues(frame.slot_offset);
+
                 if self.frames.is_empty() {
                     // Finished executing the top-level script
                     return Ok(Some(result));
@@ -168,6 +175,37 @@ impl VirtualMachine {
                 let slot_offset = self.current_frame().slot_offset;
                 self.stack[slot_offset + slot] = value;
             }
+            GetUpvalue(slot) => {
+                let upvalue = self.current_frame().closure.upvalues[slot as usize].clone();
+                let value = {
+                    let uv = upvalue.borrow();
+                    if let Some(stack_idx) = uv.location {
+                        // Open upvalue - read from stack
+                        self.stack[stack_idx].clone()
+                    } else {
+                        // Closed upvalue - read stored value
+                        uv.closed.clone()
+                    }
+                };
+                self.push(value);
+            }
+            SetUpvalue(slot) => {
+                let value = self.peek(0).clone();
+                let upvalue = self.current_frame().closure.upvalues[slot as usize].clone();
+                let mut uv = upvalue.borrow_mut();
+                if let Some(stack_idx) = uv.location {
+                    // Open upvalue - write to stack
+                    self.stack[stack_idx] = value;
+                } else {
+                    // Closed upvalue - write to stored value
+                    uv.closed = value;
+                }
+            }
+            CloseUpvalue => {
+                let top = self.stack.len() - 1;
+                self.close_upvalues(top);
+                self.pop();
+            }
             Constant(idx) => {
                 let constant = self
                     .current_frame()
@@ -176,6 +214,30 @@ impl VirtualMachine {
                     .ok_or(LoxError::RuntimeError("No such constant.".into()))?
                     .clone();
                 self.push(constant);
+            }
+            Closure(idx, ref upvalue_descs) => {
+                let function = match self.current_frame().chunk().constant(idx) {
+                    Some(Value::Function(f)) => f.clone(),
+                    _ => return Err(LoxError::RuntimeError("Expected function constant.".into())),
+                };
+
+                let mut closure = LoxClosure::new(function);
+
+                // Capture upvalues
+                for desc in upvalue_descs {
+                    let upvalue = if desc.is_local {
+                        // Capture local from enclosing function
+                        let slot_offset = self.current_frame().slot_offset;
+                        let stack_index = slot_offset + desc.index as usize;
+                        self.capture_upvalue(stack_index)
+                    } else {
+                        // Capture upvalue from enclosing closure
+                        self.current_frame().closure.upvalues[desc.index as usize].clone()
+                    };
+                    closure.upvalues.push(upvalue);
+                }
+
+                self.push(Value::Closure(Rc::new(closure)));
             }
             Negate => {
                 let value = self.pop();
@@ -284,22 +346,91 @@ impl VirtualMachine {
         Ok(None)
     }
 
+    /// Captures a local variable, reusing existing upvalue if one exists
+    fn capture_upvalue(&mut self, stack_index: usize) -> Rc<RefCell<LoxUpvalue>> {
+        // Walk the open upvalues list looking for one that captures this slot
+        let mut prev: Option<Rc<RefCell<LoxUpvalue>>> = None;
+        let mut current = self.open_upvalues.clone();
+
+        loop {
+            let upvalue_rc = match current {
+                Some(ref rc) => rc.clone(),
+                None => break,
+            };
+
+            let (loc, next) = {
+                let upvalue = upvalue_rc.borrow();
+                (upvalue.location, upvalue.next.clone())
+            };
+
+            if let Some(l) = loc {
+                if l == stack_index {
+                    // Found existing upvalue for this slot
+                    return upvalue_rc;
+                }
+                if l < stack_index {
+                    // Passed the slot, not found
+                    break;
+                }
+            }
+
+            prev = Some(upvalue_rc);
+            current = next;
+        }
+
+        // Create new upvalue
+        let new_upvalue = Rc::new(RefCell::new(LoxUpvalue::new(stack_index)));
+
+        // Insert into list
+        new_upvalue.borrow_mut().next = current;
+
+        if let Some(prev_rc) = prev {
+            prev_rc.borrow_mut().next = Some(new_upvalue.clone());
+        } else {
+            self.open_upvalues = Some(new_upvalue.clone());
+        }
+
+        new_upvalue
+    }
+
+    /// Closes all upvalues pointing to slots at or above the given index
+    fn close_upvalues(&mut self, last: usize) {
+        while let Some(ref upvalue_rc) = self.open_upvalues.clone() {
+            let mut upvalue = upvalue_rc.borrow_mut();
+
+            if let Some(loc) = upvalue.location {
+                if loc < last {
+                    break;
+                }
+
+                // Close this upvalue
+                let value = self.stack[loc].clone();
+                upvalue.close(value);
+
+                // Remove from open list
+                self.open_upvalues = upvalue.next.take();
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Call a value (function or native)
     fn call_value(&mut self, callee: Value, arg_count: u8) -> Result<(), LoxError> {
         match callee {
-            Value::Function(function) => self.call(function, arg_count),
+            Value::Closure(closure) => self.call(closure, arg_count),
             Value::NativeFunction(native) => self.call_native(native, arg_count),
             _ => Err(self.runtime_error("Can only call functions and classes.")),
         }
     }
 
-    /// Call a Lox function
-    fn call(&mut self, function: Rc<LoxFunction>, arg_count: u8) -> Result<(), LoxError> {
+    /// Call a Lox closure
+    fn call(&mut self, closure: Rc<LoxClosure>, arg_count: u8) -> Result<(), LoxError> {
         // Check arity
-        if arg_count != function.arity {
+        if arg_count != closure.function.arity {
             return Err(self.runtime_error(&format!(
                 "Expected {} arguments but got {}.",
-                function.arity, arg_count
+                closure.function.arity, arg_count
             )));
         }
 
@@ -309,9 +440,9 @@ impl VirtualMachine {
         }
 
         // Create new call frame
-        // The slot_offset points to the function object on the stack
+        // The slot_offset points to the closure object on the stack
         let slot_offset = self.stack.len() - arg_count as usize - 1;
-        let frame = CallFrame::new(function, slot_offset);
+        let frame = CallFrame::new(closure, slot_offset);
         self.frames.push(frame);
         Ok(())
     }
@@ -344,7 +475,7 @@ impl VirtualMachine {
         trace.push_str(&format!("{}\n", message));
 
         for frame in self.frames.iter().rev() {
-            let function = &frame.function;
+            let function = &frame.closure.function;
             let line = function.chunk.lines.get(frame.ip.saturating_sub(1)).unwrap_or(&0);
 
             let name = match &function.name {
@@ -360,14 +491,18 @@ impl VirtualMachine {
     /// Interprets a compiled function
     /// @param function The compiled function to execute
     /// @return Result indicating if the function was successfully interpreted
-    pub fn interpret(function: Rc<LoxFunction>) -> LoxResult<Value> {
+    pub fn interpret(function: LoxFunction) -> LoxResult<Value> {
         let mut vm = Self::new(false);
 
-        // Push the function onto the stack
-        vm.push(Value::Function(function.clone()));
+        // Wrap the function in a closure
+        let function_rc = Rc::new(function);
+        let closure = Rc::new(LoxClosure::new(function_rc));
 
-        // Create initial call frame for the script function
-        let frame = CallFrame::new(function, 0);
+        // Push the closure onto the stack
+        vm.push(Value::Closure(closure.clone()));
+
+        // Create initial call frame for the script closure
+        let frame = CallFrame::new(closure, 0);
         vm.frames.push(frame);
 
         loop {
@@ -440,6 +575,7 @@ impl fmt::Display for Value {
             Value::Nil => write!(f, "nil"),
             Value::String(s) => write!(f, "{}", s),
             Value::Function(func) => write!(f, "{}", func),
+            Value::Closure(closure) => write!(f, "{}", closure),
             Value::NativeFunction(native) => write!(f, "{}", native),
         }
     }

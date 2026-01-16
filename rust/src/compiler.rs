@@ -5,7 +5,7 @@ use crate::{
     LoxError, LoxResult,
     chunk::{Chunk, Instruction, Value},
     error::ParseError,
-    object::{LoxFunction, StringInterner},
+    object::{LoxFunction, StringInterner, UpvalueDescriptor},
     scanner::{Scanner, Token, TokenType},
 };
 
@@ -136,6 +136,17 @@ impl ParseRule {
 struct Local<'source> {
     name: Token<'source>,
     depth: i32,
+    /// Whether this local is captured by a closure
+    is_captured: bool,
+}
+
+/// Compiler-time representation of an upvalue
+#[derive(Clone, Copy)]
+struct Upvalue {
+    /// Index of the local or upvalue being captured
+    index: u8,
+    /// True if capturing a local, false if capturing an upvalue
+    is_local: bool,
 }
 
 /// Type of function being compiled
@@ -155,6 +166,8 @@ struct Compiler<'source> {
     function_type: FunctionType,
     /// Local variables in scope
     locals: Vec<Local<'source>>,
+    /// Upvalues captured by this function
+    upvalues: Vec<Upvalue>,
     /// Current scope depth
     scope_depth: i32,
 }
@@ -166,6 +179,7 @@ impl<'source> Compiler<'source> {
             function: LoxFunction::new(),
             function_type,
             locals: Vec::new(),
+            upvalues: Vec::new(),
             scope_depth: 0,
         };
 
@@ -178,6 +192,7 @@ impl<'source> Compiler<'source> {
                 span: (0, 0),
             },
             depth: 0,
+            is_captured: false,
         });
 
         compiler
@@ -330,18 +345,30 @@ impl<'source> Parser<'source> {
         // End compiler and get the function
         let function = self.end_compiler();
 
+        // Collect upvalue descriptors before restoring enclosing compiler
+        let upvalue_descriptors: Vec<UpvalueDescriptor> = self.compiler.upvalues
+            .iter()
+            .map(|u| UpvalueDescriptor {
+                is_local: u.is_local,
+                index: u.index,
+            })
+            .collect();
+
         // Restore the enclosing compiler
         let enclosing = self.compiler.enclosing.take().expect("No enclosing compiler");
         self.compiler = *enclosing;
 
-        // Emit the function as a constant
+        // Emit the closure instruction with upvalue info
         let constant = self.current_chunk().add_constant(Value::Function(Rc::new(function)));
         let line = self.previous.line;
-        self.current_chunk().write(Instruction::Constant(constant), line);
+        self.current_chunk().write(Instruction::Closure(constant, upvalue_descriptors), line);
     }
 
     fn end_compiler(&mut self) -> LoxFunction {
         self.emit_return();
+
+        // Set the upvalue count on the function
+        self.compiler.function.upvalue_count = self.compiler.upvalues.len();
 
         // Take the function out of the compiler
         std::mem::take(&mut self.compiler.function)
@@ -378,9 +405,9 @@ impl<'source> Parser<'source> {
         self.identifier_constant(self.previous)
     }
 
-    fn identifier_constant(&mut self, name: Token<'source>) -> usize {
-        let interned = self.interner.intern(name.lexeme);
-        self.current_chunk().add_constant(Value::String(interned))
+    fn identifier_constant(&mut self, name: Token) -> usize {
+        let name_string = self.interner.intern(name.lexeme);
+        self.current_chunk().add_constant(Value::String(name_string))
     }
 
     fn declare_variable(&mut self) {
@@ -390,7 +417,7 @@ impl<'source> Parser<'source> {
 
         let name = self.previous;
 
-        // Check for duplicate local variable in same scope
+        // Check for duplicate in current scope
         let mut has_duplicate = false;
         for local in self.compiler.locals.iter().rev() {
             if local.depth != -1 && local.depth < self.compiler.scope_depth {
@@ -415,7 +442,11 @@ impl<'source> Parser<'source> {
     }
 
     fn add_local(&mut self, name: Token<'source>) {
-        let local = Local { name, depth: -1 }; // -1 marks uninitialized
+        let local = Local {
+            name,
+            depth: -1,
+            is_captured: false,
+        };
         self.compiler.locals.push(local);
     }
 
@@ -507,7 +538,14 @@ impl<'source> Parser<'source> {
             && self.compiler.locals.last().unwrap().depth > self.compiler.scope_depth
         {
             let line = self.previous.line;
-            self.current_chunk().write(Instruction::Pop, line);
+
+            if self.compiler.locals.last().unwrap().is_captured {
+                // Variable already captured by closure
+                self.current_chunk().write(Instruction::CloseUpvalue, line);
+            } else {
+                // Not captured so just pop
+                self.current_chunk().write(Instruction::Pop, line);
+            }
             self.compiler.locals.pop();
         }
     }
@@ -678,12 +716,13 @@ impl<'source> Parser<'source> {
     }
 
     fn named_variable(&mut self, name: Token<'source>, can_assign: bool) {
-        let (get_op, set_op) = match self.resolve_local(&name) {
-            Some(slot) => (Instruction::GetLocal(slot), Instruction::SetLocal(slot)),
-            None => {
-                let arg = self.identifier_constant(name);
-                (Instruction::GetGlobal(arg), Instruction::SetGlobal(arg))
-            }
+        let (get_op, set_op) = if let Some(slot) = self.resolve_local(&name) {
+            (Instruction::GetLocal(slot), Instruction::SetLocal(slot))
+        } else if let Some(upvalue) = self.resolve_upvalue(&name) {
+            (Instruction::GetUpvalue(upvalue), Instruction::SetUpvalue(upvalue))
+        } else {
+            let arg = self.identifier_constant(name);
+            (Instruction::GetGlobal(arg), Instruction::SetGlobal(arg))
         };
 
         let line = self.previous.line;
@@ -707,6 +746,73 @@ impl<'source> Parser<'source> {
         None
     }
 
+    /// Resolve a variable as an upvalue
+    fn resolve_upvalue(&mut self, name: &Token) -> Option<u8> {
+        let mut enclosing = self.compiler.enclosing.take()?;
+
+        let result = if let Some(local_idx) = Self::resolve_local_in_compiler(&enclosing, name) {
+            // Mark the local as captured
+            enclosing.locals[local_idx].is_captured = true;
+            // Restore enclosing before adding upvalue
+            self.compiler.enclosing = Some(enclosing);
+            // Add upvalue to current compiler referencing the local
+            Some(self.add_upvalue(local_idx as u8, true))
+        } else {
+            let current = std::mem::replace(&mut self.compiler, *enclosing);
+
+            // Recursively try to resolve in the enclosing compiler
+            let recursive_result = self.resolve_upvalue(name);
+
+            enclosing = Box::new(std::mem::replace(&mut self.compiler, current));
+
+            // Restore enclosing
+            self.compiler.enclosing = Some(enclosing);
+
+            if let Some(upvalue_idx) = recursive_result {
+                // Found in an outer scope so add upvalue pointing to enclosing's upvalue
+                Some(self.add_upvalue(upvalue_idx, false))
+            } else {
+                None
+            }
+        };
+
+        result
+    }
+
+    /// Resolve a local variable in a specific compiler
+    fn resolve_local_in_compiler(compiler: &Compiler, name: &Token) -> Option<usize> {
+        for (i, local) in compiler.locals.iter().enumerate().rev() {
+            if local.name.lexeme == name.lexeme {
+                if local.depth == -1 {
+                    return None;
+                }
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Add an upvalue to the current compiler
+    fn add_upvalue(&mut self, index: u8, is_local: bool) -> u8 {
+        let upvalue_count = self.compiler.upvalues.len();
+
+        // Check if we already have this upvalue
+        for (i, upvalue) in self.compiler.upvalues.iter().enumerate() {
+            if upvalue.index == index && upvalue.is_local == is_local {
+                return i as u8;
+            }
+        }
+
+        if upvalue_count >= 256 {
+            self.error_at_previous("Too many closure variables in function.");
+            return 0;
+        }
+
+        self.compiler.upvalues.push(Upvalue { index, is_local });
+        self.compiler.function.upvalue_count = self.compiler.upvalues.len();
+        upvalue_count as u8
+    }
+
     fn argument_list(&mut self) -> u8 {
         let mut arg_count: u8 = 0;
         if !self.check(TokenType::RightParen) {
@@ -727,28 +833,30 @@ impl<'source> Parser<'source> {
 
     fn parse_precedence(&mut self, precedence: Precedence) {
         self.advance();
-        let prefix_rule = ParseRule::get_rule(self.previous.kind).prefix;
-        let can_assign = precedence <= Precedence::Assignment;
 
-        if let Some(prefix_fn) = prefix_rule {
-            prefix_fn(self, can_assign);
-        } else {
-            self.error_at_previous("Expect expression.");
-            return;
-        }
+        let prefix_rule = ParseRule::get_rule(self.previous.kind).prefix;
+
+        let prefix_fn = match prefix_rule {
+            Some(f) => f,
+            None => {
+                self.error_at_previous("Expect expression.");
+                return;
+            }
+        };
+
+        let can_assign = precedence <= Precedence::Assignment;
+        prefix_fn(self, can_assign);
 
         while precedence <= ParseRule::get_rule(self.current.kind).precedence {
             self.advance();
-            if let Some(infix_fn) = ParseRule::get_rule(self.previous.kind).infix {
+            let infix_rule = ParseRule::get_rule(self.previous.kind).infix;
+            if let Some(infix_fn) = infix_rule {
                 infix_fn(self, can_assign);
-            } else {
-                break;
             }
         }
 
-        if can_assign && self.current.is_token(TokenType::Equal) {
-            self.error_at_current("Invalid assignment target.");
-            self.advance();
+        if can_assign && self.match_token(TokenType::Equal) {
+            self.error_at_previous("Invalid assignment target.");
         }
     }
 
@@ -760,20 +868,15 @@ impl<'source> Parser<'source> {
         self.error_at(self.previous, message);
     }
 
-    fn error_at(&mut self, token: Token<'source>, message: &str) {
-        let (start, end) = token.span;
-        let length = end.saturating_sub(start).max(1);
-        self.errors.push(LoxError::ParseError(ParseError::new(
-            NamedSource::new(self.source_name, self.scanner.source.to_string()),
-            (start, length).into(),
-            message.to_string(),
-        )));
+    fn error_at(&mut self, token: Token, message: &str) {
+        let error = ParseError::new(message.to_string(), token.span, token.line);
+        self.errors.push(LoxError::ParseError(error));
     }
 }
 
-/// Compiles the given source code into a function.
-pub fn compile(source: &str, source_name: &str) -> LoxResult<Rc<LoxFunction>> {
-    let mut parser = Parser::new(source, source_name);
+/// Compiles source code into bytecode
+pub fn compile(source_code: &str, source_name: &str) -> LoxResult<LoxFunction> {
+    let mut parser = Parser::new(source_code, source_name);
 
     parser.advance();
 
@@ -785,154 +888,129 @@ pub fn compile(source: &str, source_name: &str) -> LoxResult<Rc<LoxFunction>> {
 
     let function = parser.end_compiler();
 
-    if parser.errors.is_empty() {
-        Ok(Rc::new(function))
+    if !parser.errors.is_empty() {
+        // Attach source to errors for nice error messages
+        let source = NamedSource::new(source_name, source_code.to_string());
+        let errors: Vec<LoxError> = parser.errors.into_iter().map(|e| {
+            if let LoxError::ParseError(pe) = e {
+                LoxError::ParseError(pe.with_source(source.clone()))
+            } else {
+                e
+            }
+        }).collect();
+        Err(errors)
     } else {
-        Err(parser.errors)
+        Ok(function)
     }
 }
 
-fn number(parser: &mut Parser<'_>, _can_assign: bool) {
-    let literal = parser.previous.lexeme;
+fn number(parser: &mut Parser, _can_assign: bool) {
+    let value: f64 = parser.previous.lexeme.parse().unwrap_or(0.0);
     let line = parser.previous.line;
-    match literal.parse::<f64>() {
-        Ok(value) => {
-            parser.current_chunk().write_constant(Value::Number(value), line);
-        }
-        Err(_) => parser.error_at_previous("Invalid number literal."),
-    }
+    parser.current_chunk().write_constant(Value::Number(value), line);
 }
 
-fn grouping(parser: &mut Parser<'_>, _can_assign: bool) {
+fn grouping(parser: &mut Parser, _can_assign: bool) {
     parser.expression();
     parser.consume(TokenType::RightParen, "Expect ')' after expression.");
 }
 
-fn call(parser: &mut Parser<'_>, _can_assign: bool) {
+fn call(parser: &mut Parser, _can_assign: bool) {
     let arg_count = parser.argument_list();
     let line = parser.previous.line;
     parser.current_chunk().write(Instruction::Call(arg_count), line);
 }
 
-fn unary(parser: &mut Parser<'_>, _can_assign: bool) {
-    let operator = parser.previous;
+fn unary(parser: &mut Parser, _can_assign: bool) {
+    let operator_type = parser.previous.kind;
+    let line = parser.previous.line;
+
+    // Compile the operand
     parser.parse_precedence(Precedence::Unary);
 
-    let line = operator.line;
-    match operator.kind {
-        TokenType::Minus => {
-            parser.current_chunk().write(Instruction::Negate, line);
-        }
-        TokenType::Bang => {
-            parser.current_chunk().write(Instruction::Not, line);
-        }
-        _ => parser.error_at_previous("Unsupported unary operator."),
+    // Emit the operator instruction
+    match operator_type {
+        TokenType::Minus => { parser.current_chunk().write(Instruction::Negate, line); }
+        TokenType::Bang => { parser.current_chunk().write(Instruction::Not, line); }
+        _ => {}
     }
 }
 
-fn binary(parser: &mut Parser<'_>, _can_assign: bool) {
-    let operator = parser.previous;
-    let rule = ParseRule::get_rule(operator.kind);
+fn binary(parser: &mut Parser, _can_assign: bool) {
+    let operator_type = parser.previous.kind;
+    let line = parser.previous.line;
+
+    let rule = ParseRule::get_rule(operator_type);
     parser.parse_precedence(rule.precedence.next());
 
-    let line = operator.line;
-    match operator.kind {
-        TokenType::Plus => {
-            parser.current_chunk().write(Instruction::Add, line);
-        }
-        TokenType::Minus => {
-            parser.current_chunk().write(Instruction::Sub, line);
-        }
-        TokenType::Star => {
-            parser.current_chunk().write(Instruction::Mul, line);
-        }
-        TokenType::Slash => {
-            parser.current_chunk().write(Instruction::Div, line);
-        }
-        TokenType::EqualEqual => {
-            parser.current_chunk().write(Instruction::Equal, line);
-        }
+    match operator_type {
+        TokenType::Plus => { parser.current_chunk().write(Instruction::Add, line); }
+        TokenType::Minus => { parser.current_chunk().write(Instruction::Sub, line); }
+        TokenType::Star => { parser.current_chunk().write(Instruction::Mul, line); }
+        TokenType::Slash => { parser.current_chunk().write(Instruction::Div, line); }
         TokenType::BangEqual => {
             parser.current_chunk().write(Instruction::Equal, line);
             parser.current_chunk().write(Instruction::Not, line);
         }
-        TokenType::Greater => {
-            parser.current_chunk().write(Instruction::Greater, line);
-        }
+        TokenType::EqualEqual => { parser.current_chunk().write(Instruction::Equal, line); }
+        TokenType::Greater => { parser.current_chunk().write(Instruction::Greater, line); }
         TokenType::GreaterEqual => {
             parser.current_chunk().write(Instruction::Less, line);
             parser.current_chunk().write(Instruction::Not, line);
         }
-        TokenType::Less => {
-            parser.current_chunk().write(Instruction::Less, line);
-        }
+        TokenType::Less => { parser.current_chunk().write(Instruction::Less, line); }
         TokenType::LessEqual => {
             parser.current_chunk().write(Instruction::Greater, line);
             parser.current_chunk().write(Instruction::Not, line);
         }
-        _ => parser.error_at_previous("Unsupported binary operator."),
+        _ => {}
     }
 }
 
-fn string(parser: &mut Parser<'_>, _can_assign: bool) {
+fn string(parser: &mut Parser, _can_assign: bool) {
+    // Remove quotes from string
     let lexeme = parser.previous.lexeme;
+    let string_value = &lexeme[1..lexeme.len() - 1];
+    let interned = parser.interner.intern(string_value);
     let line = parser.previous.line;
-    // Remove surrounding quotes
-    let string_content = &lexeme[1..lexeme.len() - 1];
-    // Intern the string
-    let interned = parser.interner.intern(string_content);
-    // Write as constant
     parser.current_chunk().write_constant(Value::String(interned), line);
 }
 
-fn literal(parser: &mut Parser<'_>, _can_assign: bool) {
+fn literal(parser: &mut Parser, _can_assign: bool) {
     let line = parser.previous.line;
     match parser.previous.kind {
-        TokenType::False => {
-            parser.current_chunk().write_constant(Value::Bool(false), line);
-        }
-        TokenType::True => {
-            parser.current_chunk().write_constant(Value::Bool(true), line);
-        }
-        TokenType::Nil => {
-            parser.current_chunk().write_constant(Value::Nil, line);
-        }
-        _ => parser.error_at_previous("Unsupported literal."),
+        TokenType::False => { parser.current_chunk().write(Instruction::False, line); }
+        TokenType::True => { parser.current_chunk().write(Instruction::True, line); }
+        TokenType::Nil => { parser.current_chunk().write(Instruction::Nil, line); }
+        _ => {}
     }
 }
 
-fn variable(parser: &mut Parser<'_>, can_assign: bool) {
+fn variable(parser: &mut Parser, can_assign: bool) {
     let name = parser.previous;
     parser.named_variable(name, can_assign);
 }
 
-fn and_(parser: &mut Parser<'_>, _can_assign: bool) {
-    // Left operand is already on the stack
-    // Short-circuit: if falsey, skip right operand
+fn and_(parser: &mut Parser, _can_assign: bool) {
+    // Short-circuit: if left side is false, skip right side
     let end_jump = parser.emit_jump(Instruction::JumpIfFalse(0));
 
     let line = parser.previous.line;
-    parser.current_chunk().write(Instruction::Pop, line); // Pop left operand if truthy
+    parser.current_chunk().write(Instruction::Pop, line);
     parser.parse_precedence(Precedence::And);
 
     parser.patch_jump(end_jump);
-    // If we jumped, the falsey left operand is still on stack as the result
-    // If we didn't jump, the right operand is now on stack as the result
 }
 
-fn or_(parser: &mut Parser<'_>, _can_assign: bool) {
-    // Left operand already on the stack
-    // Short-circuit: if falsey, evaluate right; if truthy, skip right
+fn or_(parser: &mut Parser, _can_assign: bool) {
+    // Short-circuit: if left side is true, skip right side
     let else_jump = parser.emit_jump(Instruction::JumpIfFalse(0));
     let end_jump = parser.emit_jump(Instruction::Jump(0));
 
     parser.patch_jump(else_jump);
     let line = parser.previous.line;
-    parser.current_chunk().write(Instruction::Pop, line); // Pop left operand if falsey
+    parser.current_chunk().write(Instruction::Pop, line);
 
     parser.parse_precedence(Precedence::Or);
-
     parser.patch_jump(end_jump);
-    // If left truthy, we jumped to end with it still on stack
-    // If left falsey, we popped it and right operand is now on stack
 }

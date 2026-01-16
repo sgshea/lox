@@ -1,10 +1,10 @@
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use crate::object::{LoxFunction, NativeFunction};
+use crate::object::{LoxClosure, LoxFunction, NativeFunction, UpvalueDescriptor};
 
 /// Op code instructions
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum Instruction {
     // Signal returning
     Return,
@@ -37,12 +37,18 @@ pub enum Instruction {
     // Local variable operations
     GetLocal(usize),
     SetLocal(usize),
+    // Upvalue operations (for closures)
+    GetUpvalue(u8),
+    SetUpvalue(u8),
+    CloseUpvalue,
     // Control flow instructions
     Jump(u16),        // Unconditional forward jump by offset
     JumpIfFalse(u16), // Jump if top of stack is falsey (does not pop)
     Loop(u16),        // Unconditional backward jump by offset
     // Function call instruction
     Call(u8),         // Call a function with the given number of arguments
+    // Closure creation
+    Closure(usize, Vec<UpvalueDescriptor>), // Create closure from function constant with upvalue descriptors
 }
 
 /// Values of the language
@@ -53,6 +59,7 @@ pub enum Value {
     Nil,
     String(Rc<String>),
     Function(Rc<LoxFunction>),
+    Closure(Rc<LoxClosure>),
     NativeFunction(Rc<NativeFunction>),
 }
 
@@ -65,6 +72,7 @@ impl PartialEq for Value {
             (Value::String(a), Value::String(b)) => a == b,
             // Functions are equal only if they are the same object (pointer equality)
             (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
+            (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::NativeFunction(a), Value::NativeFunction(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
@@ -137,7 +145,7 @@ impl Chunk {
     /// @param instructions The instructions to emit
     pub fn emit_instructions(&mut self, line: usize, instructions: &[Instruction]) {
         for instruction in instructions {
-            self.write(*instruction, line);
+            self.write(instruction.clone(), line);
         }
     }
 }
@@ -162,6 +170,22 @@ impl Debug for Chunk {
                 }
                 Instruction::Call(arg_count) => {
                     writeln!(f, "{:04} {:4} {:?} ({} args)", i, line, op_code, arg_count)?;
+                }
+                Instruction::Closure(index, upvalues) => {
+                    writeln!(f, "{:04} {:4} Closure {:?} ({} upvalues)", i, line, self.constants.get(*index), upvalues.len())?;
+                    for (j, uv) in upvalues.iter().enumerate() {
+                        let locality = if uv.is_local { "local" } else { "upvalue" };
+                        writeln!(f, "     |    upvalue {}: {} {}", j, locality, uv.index)?;
+                    }
+                }
+                Instruction::GetUpvalue(slot) => {
+                    writeln!(f, "{:04} {:4} GetUpvalue {}", i, line, slot)?;
+                }
+                Instruction::SetUpvalue(slot) => {
+                    writeln!(f, "{:04} {:4} SetUpvalue {}", i, line, slot)?;
+                }
+                Instruction::CloseUpvalue => {
+                    writeln!(f, "{:04} {:4} CloseUpvalue", i, line)?;
                 }
                 _ => writeln!(f, "{:04} {:4} {:?}", i, line, op_code)?,
             }
