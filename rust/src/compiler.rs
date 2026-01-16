@@ -1,10 +1,11 @@
 use miette::NamedSource;
+use std::rc::Rc;
 
 use crate::{
     LoxError, LoxResult,
     chunk::{Chunk, Instruction, Value},
     error::ParseError,
-    object::StringInterner,
+    object::{LoxFunction, StringInterner},
     scanner::{Scanner, Token, TokenType},
 };
 
@@ -42,7 +43,7 @@ impl Precedence {
     }
 }
 
-type ParseFn = for<'source> fn(&mut Parser<'source>, &mut Chunk, bool);
+type ParseFn = for<'source> fn(&mut Parser<'source>, bool);
 
 #[derive(Copy, Clone)]
 struct ParseRule {
@@ -58,7 +59,7 @@ impl ParseRule {
         match token_type {
             LeftParen => Self {
                 prefix: Some(grouping),
-                infix: None,
+                infix: Some(call),
                 precedence: Precedence::Call,
             },
             And => Self {
@@ -137,18 +138,60 @@ struct Local<'source> {
     depth: i32,
 }
 
+/// Type of function being compiled
+#[derive(PartialEq, Clone, Copy)]
+enum FunctionType {
+    Script,
+    Function,
+}
+
 /// Compiler state for tracking local variables and scope
 struct Compiler<'source> {
+    /// The enclosing compiler (for nested functions)
+    enclosing: Option<Box<Compiler<'source>>>,
+    /// The function being compiled
+    function: LoxFunction,
+    /// The type of function being compiled
+    function_type: FunctionType,
+    /// Local variables in scope
     locals: Vec<Local<'source>>,
+    /// Current scope depth
     scope_depth: i32,
 }
 
 impl<'source> Compiler<'source> {
-    fn new() -> Self {
-        Self {
+    fn new(function_type: FunctionType) -> Self {
+        let mut compiler = Self {
+            enclosing: None,
+            function: LoxFunction::new(),
+            function_type,
             locals: Vec::new(),
             scope_depth: 0,
-        }
+        };
+
+        // Reserve slot 0
+        compiler.locals.push(Local {
+            name: Token {
+                kind: TokenType::Error,
+                lexeme: "",
+                line: 0,
+                span: (0, 0),
+            },
+            depth: 0,
+        });
+
+        compiler
+    }
+
+    fn new_with_name(function_type: FunctionType, name: Rc<String>) -> Self {
+        let mut compiler = Self::new(function_type);
+        compiler.function.name = Some(name);
+        compiler
+    }
+
+    /// Get a mutable reference to the current chunk
+    fn current_chunk(&mut self) -> &mut Chunk {
+        &mut self.function.chunk
     }
 }
 
@@ -174,7 +217,7 @@ impl<'source> Parser<'source> {
             previous: Self::sentinel_token(),
             errors: Vec::new(),
             interner: StringInterner::new(),
-            compiler: Compiler::new(),
+            compiler: Compiler::new(FunctionType::Script),
         }
     }
 
@@ -185,6 +228,11 @@ impl<'source> Parser<'source> {
             line: 0,
             span: (0, 0),
         }
+    }
+
+    /// Get a mutable reference to the current chunk
+    fn current_chunk(&mut self) -> &mut Chunk {
+        self.compiler.current_chunk()
     }
 
     /// Advances the parser to the next token, reporting any scanning errors along the way.
@@ -221,15 +269,17 @@ impl<'source> Parser<'source> {
         true
     }
 
-    fn expression(&mut self, chunk: &mut Chunk) {
-        self.parse_precedence(chunk, Precedence::Assignment);
+    fn expression(&mut self) {
+        self.parse_precedence(Precedence::Assignment);
     }
 
-    fn declaration(&mut self, chunk: &mut Chunk) {
-        if self.match_token(TokenType::Var) {
-            self.var_declaration(chunk);
+    fn declaration(&mut self) {
+        if self.match_token(TokenType::Fun) {
+            self.fun_declaration();
+        } else if self.match_token(TokenType::Var) {
+            self.var_declaration();
         } else {
-            self.statement(chunk);
+            self.statement();
         }
 
         // Synchronize on errors
@@ -238,20 +288,86 @@ impl<'source> Parser<'source> {
         }
     }
 
-    fn var_declaration(&mut self, chunk: &mut Chunk) {
-        let global = self.parse_variable(chunk, "Expect variable name.");
+    fn fun_declaration(&mut self) {
+        let global = self.parse_variable("Expect function name.");
+        self.mark_initialized();
+        self.function(FunctionType::Function);
+        self.define_variable(global);
+    }
+
+    fn function(&mut self, function_type: FunctionType) {
+        let name = self.interner.intern(self.previous.lexeme);
+
+        let new_compiler = Compiler::new_with_name(function_type, name);
+
+        // Swap in the new compiler, storing the old one as enclosing
+        let old_compiler = std::mem::replace(&mut self.compiler, new_compiler);
+        self.compiler.enclosing = Some(Box::new(old_compiler));
+
+        self.begin_scope();
+
+        // Parse parameters
+        self.consume(TokenType::LeftParen, "Expect '(' after function name.");
+        if !self.check(TokenType::RightParen) {
+            loop {
+                if self.compiler.function.arity == u8::MAX {
+                    self.error_at_current("Can't have more than 255 parameters.");
+                }
+                self.compiler.function.arity += 1;
+                let param = self.parse_variable("Expect parameter name.");
+                self.define_variable(param);
+                if !self.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenType::RightParen, "Expect ')' after parameters.");
+
+        // Parse body
+        self.consume(TokenType::LeftBrace, "Expect '{' before function body.");
+        self.block();
+
+        // End compiler and get the function
+        let function = self.end_compiler();
+
+        // Restore the enclosing compiler
+        let enclosing = self.compiler.enclosing.take().expect("No enclosing compiler");
+        self.compiler = *enclosing;
+
+        // Emit the function as a constant
+        let constant = self.current_chunk().add_constant(Value::Function(Rc::new(function)));
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Constant(constant), line);
+    }
+
+    fn end_compiler(&mut self) -> LoxFunction {
+        self.emit_return();
+
+        // Take the function out of the compiler
+        std::mem::take(&mut self.compiler.function)
+    }
+
+    fn emit_return(&mut self) {
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Nil, line);
+        self.current_chunk().write(Instruction::Return, line);
+    }
+
+    fn var_declaration(&mut self) {
+        let global = self.parse_variable("Expect variable name.");
 
         if self.match_token(TokenType::Equal) {
-            self.expression(chunk);
+            self.expression();
         } else {
-            chunk.write(Instruction::Nil, self.previous.line);
+            let line = self.previous.line;
+            self.current_chunk().write(Instruction::Nil, line);
         }
 
         self.consume(TokenType::Semicolon, "Expect ';' after variable declaration.");
-        self.define_variable(chunk, global);
+        self.define_variable(global);
     }
 
-    fn parse_variable(&mut self, chunk: &mut Chunk, error_message: &str) -> usize {
+    fn parse_variable(&mut self, error_message: &str) -> usize {
         self.consume(TokenType::Identifier, error_message);
 
         self.declare_variable();
@@ -259,12 +375,12 @@ impl<'source> Parser<'source> {
             return 0;
         }
 
-        self.identifier_constant(chunk, self.previous)
+        self.identifier_constant(self.previous)
     }
 
-    fn identifier_constant(&mut self, chunk: &mut Chunk, name: Token<'source>) -> usize {
+    fn identifier_constant(&mut self, name: Token<'source>) -> usize {
         let interned = self.interner.intern(name.lexeme);
-        chunk.add_constant(Value::String(interned))
+        self.current_chunk().add_constant(Value::String(interned))
     }
 
     fn declare_variable(&mut self) {
@@ -303,13 +419,14 @@ impl<'source> Parser<'source> {
         self.compiler.locals.push(local);
     }
 
-    fn define_variable(&mut self, chunk: &mut Chunk, global: usize) {
+    fn define_variable(&mut self, global: usize) {
         if self.compiler.scope_depth > 0 {
             self.mark_initialized();
             return;
         }
 
-        chunk.write(Instruction::DefineGlobal(global), self.previous.line);
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::DefineGlobal(global), line);
     }
 
     fn mark_initialized(&mut self) {
@@ -321,39 +438,58 @@ impl<'source> Parser<'source> {
         }
     }
 
-    fn statement(&mut self, chunk: &mut Chunk) {
+    fn statement(&mut self) {
         if self.match_token(TokenType::Print) {
-            self.print_statement(chunk);
+            self.print_statement();
+        } else if self.match_token(TokenType::Return) {
+            self.return_statement();
         } else if self.match_token(TokenType::If) {
-            self.if_statement(chunk);
+            self.if_statement();
         } else if self.match_token(TokenType::While) {
-            self.while_statement(chunk);
+            self.while_statement();
         } else if self.match_token(TokenType::For) {
-            self.for_statement(chunk);
+            self.for_statement();
         } else if self.match_token(TokenType::LeftBrace) {
             self.begin_scope();
-            self.block(chunk);
-            self.end_scope(chunk);
+            self.block();
+            self.end_scope();
         } else {
-            self.expression_statement(chunk);
+            self.expression_statement();
         }
     }
 
-    fn print_statement(&mut self, chunk: &mut Chunk) {
-        self.expression(chunk);
+    fn return_statement(&mut self) {
+        if self.compiler.function_type == FunctionType::Script {
+            self.error_at_previous("Can't return from top-level code.");
+        }
+
+        if self.match_token(TokenType::Semicolon) {
+            self.emit_return();
+        } else {
+            self.expression();
+            self.consume(TokenType::Semicolon, "Expect ';' after return value.");
+            let line = self.previous.line;
+            self.current_chunk().write(Instruction::Return, line);
+        }
+    }
+
+    fn print_statement(&mut self) {
+        self.expression();
         self.consume(TokenType::Semicolon, "Expect ';' after value.");
-        chunk.write(Instruction::Print, self.previous.line);
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Print, line);
     }
 
-    fn expression_statement(&mut self, chunk: &mut Chunk) {
-        self.expression(chunk);
+    fn expression_statement(&mut self) {
+        self.expression();
         self.consume(TokenType::Semicolon, "Expect ';' after expression.");
-        chunk.write(Instruction::Pop, self.previous.line);
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Pop, line);
     }
 
-    fn block(&mut self, chunk: &mut Chunk) {
+    fn block(&mut self) {
         while !self.check(TokenType::RightBrace) && !self.check(TokenType::Eof) {
-            self.declaration(chunk);
+            self.declaration();
         }
 
         self.consume(TokenType::RightBrace, "Expect '}' after block.");
@@ -363,27 +499,29 @@ impl<'source> Parser<'source> {
         self.compiler.scope_depth += 1;
     }
 
-    fn end_scope(&mut self, chunk: &mut Chunk) {
+    fn end_scope(&mut self) {
         self.compiler.scope_depth -= 1;
 
         // Pop all locals from this scope
         while !self.compiler.locals.is_empty()
             && self.compiler.locals.last().unwrap().depth > self.compiler.scope_depth
         {
-            chunk.write(Instruction::Pop, self.previous.line);
+            let line = self.previous.line;
+            self.current_chunk().write(Instruction::Pop, line);
             self.compiler.locals.pop();
         }
     }
 
     /// Emits a jump instruction with a placeholder offset, returns the index of the instruction
-    fn emit_jump(&mut self, chunk: &mut Chunk, instruction: Instruction) -> usize {
-        chunk.write(instruction, self.previous.line)
+    fn emit_jump(&mut self, instruction: Instruction) -> usize {
+        let line = self.previous.line;
+        self.current_chunk().write(instruction, line)
     }
 
     /// Patches a previously emitted jump instruction with the correct offset
-    fn patch_jump(&mut self, chunk: &mut Chunk, offset: usize) {
+    fn patch_jump(&mut self, offset: usize) {
         // Calculate jump distance: from after the jump instruction to current position
-        let jump = chunk.code.len() - offset - 1;
+        let jump = self.current_chunk().code.len() - offset - 1;
 
         if jump > u16::MAX as usize {
             self.error_at_previous("Too much code to jump over.");
@@ -391,9 +529,9 @@ impl<'source> Parser<'source> {
         }
 
         // Update the instruction with the actual offset
-        match chunk.code[offset] {
+        match self.current_chunk().code[offset] {
             Instruction::Jump(_) | Instruction::JumpIfFalse(_) => {
-                match &mut chunk.code[offset] {
+                match &mut self.current_chunk().code[offset] {
                     Instruction::Jump(o) | Instruction::JumpIfFalse(o) => {
                         *o = jump as u16
                     }
@@ -405,57 +543,62 @@ impl<'source> Parser<'source> {
     }
 
     /// Emits a loop instruction that jumps backward to loop_start
-    fn emit_loop(&mut self, chunk: &mut Chunk, loop_start: usize) {
-        let offset = chunk.code.len() - loop_start + 1;
+    fn emit_loop(&mut self, loop_start: usize) {
+        let offset = self.current_chunk().code.len() - loop_start + 1;
 
         if offset > u16::MAX as usize {
             self.error_at_previous("Loop body too large.");
             return;
         }
 
-        chunk.write(Instruction::Loop(offset as u16), self.previous.line);
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Loop(offset as u16), line);
     }
 
-    fn if_statement(&mut self, chunk: &mut Chunk) {
+    fn if_statement(&mut self) {
         self.consume(TokenType::LeftParen, "Expect '(' after 'if'.");
-        self.expression(chunk);
+        self.expression();
         self.consume(TokenType::RightParen, "Expect ')' after condition.");
 
         // Jump over the then branch if condition is falsey
-        let then_jump = self.emit_jump(chunk, Instruction::JumpIfFalse(0));
-        chunk.write(Instruction::Pop, self.previous.line); // Pop condition if true
-        self.statement(chunk);
+        let then_jump = self.emit_jump(Instruction::JumpIfFalse(0));
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Pop, line); // Pop condition if true
+        self.statement();
 
         // Jump over the else branch after executing then branch
-        let else_jump = self.emit_jump(chunk, Instruction::Jump(0));
+        let else_jump = self.emit_jump(Instruction::Jump(0));
 
-        self.patch_jump(chunk, then_jump);
-        chunk.write(Instruction::Pop, self.previous.line); // Pop condition if false
+        self.patch_jump(then_jump);
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Pop, line); // Pop condition if false
 
         if self.match_token(TokenType::Else) {
-            self.statement(chunk);
+            self.statement();
         }
-        self.patch_jump(chunk, else_jump);
+        self.patch_jump(else_jump);
     }
 
-    fn while_statement(&mut self, chunk: &mut Chunk) {
-        let loop_start = chunk.code.len();
+    fn while_statement(&mut self) {
+        let loop_start = self.current_chunk().code.len();
 
         self.consume(TokenType::LeftParen, "Expect '(' after 'while'.");
-        self.expression(chunk);
+        self.expression();
         self.consume(TokenType::RightParen, "Expect ')' after condition.");
 
         // Jump past the body if condition is falsey
-        let exit_jump = self.emit_jump(chunk, Instruction::JumpIfFalse(0));
-        chunk.write(Instruction::Pop, self.previous.line); // Pop condition
-        self.statement(chunk);
-        self.emit_loop(chunk, loop_start);
+        let exit_jump = self.emit_jump(Instruction::JumpIfFalse(0));
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Pop, line); // Pop condition
+        self.statement();
+        self.emit_loop(loop_start);
 
-        self.patch_jump(chunk, exit_jump);
-        chunk.write(Instruction::Pop, self.previous.line); // Pop condition on exit
+        self.patch_jump(exit_jump);
+        let line = self.previous.line;
+        self.current_chunk().write(Instruction::Pop, line); // Pop condition on exit
     }
 
-    fn for_statement(&mut self, chunk: &mut Chunk) {
+    fn for_statement(&mut self) {
         self.begin_scope();
         self.consume(TokenType::LeftParen, "Expect '(' after 'for'.");
 
@@ -463,50 +606,53 @@ impl<'source> Parser<'source> {
         if self.match_token(TokenType::Semicolon) {
             // No initializer
         } else if self.match_token(TokenType::Var) {
-            self.var_declaration(chunk);
+            self.var_declaration();
         } else {
-            self.expression_statement(chunk);
+            self.expression_statement();
         }
 
-        let mut loop_start = chunk.code.len();
+        let mut loop_start = self.current_chunk().code.len();
 
         // Condition clause
         let mut exit_jump = None;
         if !self.match_token(TokenType::Semicolon) {
-            self.expression(chunk);
+            self.expression();
             self.consume(TokenType::Semicolon, "Expect ';' after loop condition.");
 
             // Jump out of the loop if condition is false
-            exit_jump = Some(self.emit_jump(chunk, Instruction::JumpIfFalse(0)));
-            chunk.write(Instruction::Pop, self.previous.line); // Pop condition
+            exit_jump = Some(self.emit_jump(Instruction::JumpIfFalse(0)));
+            let line = self.previous.line;
+            self.current_chunk().write(Instruction::Pop, line); // Pop condition
         }
 
         // Increment clause
         if !self.match_token(TokenType::RightParen) {
             // Jump over increment, run body, then come back
-            let body_jump = self.emit_jump(chunk, Instruction::Jump(0));
-            let increment_start = chunk.code.len();
+            let body_jump = self.emit_jump(Instruction::Jump(0));
+            let increment_start = self.current_chunk().code.len();
 
-            self.expression(chunk);
-            chunk.write(Instruction::Pop, self.previous.line); // Pop increment result
+            self.expression();
+            let line = self.previous.line;
+            self.current_chunk().write(Instruction::Pop, line); // Pop increment result
             self.consume(TokenType::RightParen, "Expect ')' after for clauses.");
 
-            self.emit_loop(chunk, loop_start);
+            self.emit_loop(loop_start);
             loop_start = increment_start;
-            self.patch_jump(chunk, body_jump);
+            self.patch_jump(body_jump);
         }
 
         // Body
-        self.statement(chunk);
-        self.emit_loop(chunk, loop_start);
+        self.statement();
+        self.emit_loop(loop_start);
 
         // Patch exit jump if there was a condition
         if let Some(exit) = exit_jump {
-            self.patch_jump(chunk, exit);
-            chunk.write(Instruction::Pop, self.previous.line); // Pop condition on exit
+            self.patch_jump(exit);
+            let line = self.previous.line;
+            self.current_chunk().write(Instruction::Pop, line); // Pop condition on exit
         }
 
-        self.end_scope(chunk);
+        self.end_scope();
     }
 
     fn synchronize(&mut self) {
@@ -531,20 +677,21 @@ impl<'source> Parser<'source> {
         }
     }
 
-    fn named_variable(&mut self, chunk: &mut Chunk, name: Token<'source>, can_assign: bool) {
+    fn named_variable(&mut self, name: Token<'source>, can_assign: bool) {
         let (get_op, set_op) = match self.resolve_local(&name) {
             Some(slot) => (Instruction::GetLocal(slot), Instruction::SetLocal(slot)),
             None => {
-                let arg = self.identifier_constant(chunk, name);
+                let arg = self.identifier_constant(name);
                 (Instruction::GetGlobal(arg), Instruction::SetGlobal(arg))
             }
         };
 
+        let line = self.previous.line;
         if can_assign && self.match_token(TokenType::Equal) {
-            self.expression(chunk);
-            chunk.write(set_op, self.previous.line);
+            self.expression();
+            self.current_chunk().write(set_op, line);
         } else {
-            chunk.write(get_op, self.previous.line);
+            self.current_chunk().write(get_op, line);
         }
     }
 
@@ -560,13 +707,31 @@ impl<'source> Parser<'source> {
         None
     }
 
-    fn parse_precedence(&mut self, chunk: &mut Chunk, precedence: Precedence) {
+    fn argument_list(&mut self) -> u8 {
+        let mut arg_count: u8 = 0;
+        if !self.check(TokenType::RightParen) {
+            loop {
+                self.expression();
+                if arg_count == 255 {
+                    self.error_at_previous("Can't have more than 255 arguments.");
+                }
+                arg_count += 1;
+                if !self.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+        self.consume(TokenType::RightParen, "Expect ')' after arguments.");
+        arg_count
+    }
+
+    fn parse_precedence(&mut self, precedence: Precedence) {
         self.advance();
         let prefix_rule = ParseRule::get_rule(self.previous.kind).prefix;
         let can_assign = precedence <= Precedence::Assignment;
 
         if let Some(prefix_fn) = prefix_rule {
-            prefix_fn(self, chunk, can_assign);
+            prefix_fn(self, can_assign);
         } else {
             self.error_at_previous("Expect expression.");
             return;
@@ -575,7 +740,7 @@ impl<'source> Parser<'source> {
         while precedence <= ParseRule::get_rule(self.current.kind).precedence {
             self.advance();
             if let Some(infix_fn) = ParseRule::get_rule(self.previous.kind).infix {
-                infix_fn(self, chunk, can_assign);
+                infix_fn(self, can_assign);
             } else {
                 break;
             }
@@ -606,155 +771,168 @@ impl<'source> Parser<'source> {
     }
 }
 
-/// Compiles the given source code into bytecode and writes it to the provided chunk.
-pub fn compile(source: &str, source_name: &str, chunk: &mut Chunk) -> LoxResult<()> {
+/// Compiles the given source code into a function.
+pub fn compile(source: &str, source_name: &str) -> LoxResult<Rc<LoxFunction>> {
     let mut parser = Parser::new(source, source_name);
 
     parser.advance();
 
     while !parser.current.is_token(TokenType::Eof) {
-        parser.declaration(chunk);
+        parser.declaration();
     }
 
     parser.consume(TokenType::Eof, "Expect end of expression.");
 
-    chunk.emit_instructions(parser.previous.line, &[Instruction::Return]);
+    let function = parser.end_compiler();
 
     if parser.errors.is_empty() {
-        Ok(())
+        Ok(Rc::new(function))
     } else {
         Err(parser.errors)
     }
 }
 
-fn number(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+fn number(parser: &mut Parser<'_>, _can_assign: bool) {
     let literal = parser.previous.lexeme;
+    let line = parser.previous.line;
     match literal.parse::<f64>() {
         Ok(value) => {
-            chunk.write_constant(Value::Number(value), parser.previous.line);
+            parser.current_chunk().write_constant(Value::Number(value), line);
         }
         Err(_) => parser.error_at_previous("Invalid number literal."),
     }
 }
 
-fn grouping(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
-    parser.expression(chunk);
+fn grouping(parser: &mut Parser<'_>, _can_assign: bool) {
+    parser.expression();
     parser.consume(TokenType::RightParen, "Expect ')' after expression.");
 }
 
-fn unary(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
-    let operator = parser.previous;
-    parser.parse_precedence(chunk, Precedence::Unary);
+fn call(parser: &mut Parser<'_>, _can_assign: bool) {
+    let arg_count = parser.argument_list();
+    let line = parser.previous.line;
+    parser.current_chunk().write(Instruction::Call(arg_count), line);
+}
 
+fn unary(parser: &mut Parser<'_>, _can_assign: bool) {
+    let operator = parser.previous;
+    parser.parse_precedence(Precedence::Unary);
+
+    let line = operator.line;
     match operator.kind {
         TokenType::Minus => {
-            chunk.write(Instruction::Negate, operator.line);
+            parser.current_chunk().write(Instruction::Negate, line);
         }
         TokenType::Bang => {
-            chunk.write(Instruction::Not, operator.line);
+            parser.current_chunk().write(Instruction::Not, line);
         }
         _ => parser.error_at_previous("Unsupported unary operator."),
     }
 }
 
-fn binary(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+fn binary(parser: &mut Parser<'_>, _can_assign: bool) {
     let operator = parser.previous;
     let rule = ParseRule::get_rule(operator.kind);
-    parser.parse_precedence(chunk, rule.precedence.next());
+    parser.parse_precedence(rule.precedence.next());
 
+    let line = operator.line;
     match operator.kind {
         TokenType::Plus => {
-            chunk.write(Instruction::Add, operator.line);
+            parser.current_chunk().write(Instruction::Add, line);
         }
         TokenType::Minus => {
-            chunk.write(Instruction::Sub, operator.line);
+            parser.current_chunk().write(Instruction::Sub, line);
         }
         TokenType::Star => {
-            chunk.write(Instruction::Mul, operator.line);
+            parser.current_chunk().write(Instruction::Mul, line);
         }
         TokenType::Slash => {
-            chunk.write(Instruction::Div, operator.line);
+            parser.current_chunk().write(Instruction::Div, line);
         }
         TokenType::EqualEqual => {
-            chunk.write(Instruction::Equal, operator.line);
+            parser.current_chunk().write(Instruction::Equal, line);
         }
         TokenType::BangEqual => {
-            chunk.write(Instruction::Equal, operator.line);
-            chunk.write(Instruction::Not, operator.line);
+            parser.current_chunk().write(Instruction::Equal, line);
+            parser.current_chunk().write(Instruction::Not, line);
         }
         TokenType::Greater => {
-            chunk.write(Instruction::Greater, operator.line);
+            parser.current_chunk().write(Instruction::Greater, line);
         }
         TokenType::GreaterEqual => {
-            chunk.write(Instruction::Less, operator.line);
-            chunk.write(Instruction::Not, operator.line);
+            parser.current_chunk().write(Instruction::Less, line);
+            parser.current_chunk().write(Instruction::Not, line);
         }
         TokenType::Less => {
-            chunk.write(Instruction::Less, operator.line);
+            parser.current_chunk().write(Instruction::Less, line);
         }
         TokenType::LessEqual => {
-            chunk.write(Instruction::Greater, operator.line);
-            chunk.write(Instruction::Not, operator.line);
+            parser.current_chunk().write(Instruction::Greater, line);
+            parser.current_chunk().write(Instruction::Not, line);
         }
         _ => parser.error_at_previous("Unsupported binary operator."),
     }
 }
 
-fn string(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+fn string(parser: &mut Parser<'_>, _can_assign: bool) {
     let lexeme = parser.previous.lexeme;
+    let line = parser.previous.line;
     // Remove surrounding quotes
     let string_content = &lexeme[1..lexeme.len() - 1];
     // Intern the string
     let interned = parser.interner.intern(string_content);
     // Write as constant
-    chunk.write_constant(Value::String(interned), parser.previous.line);
+    parser.current_chunk().write_constant(Value::String(interned), line);
 }
 
-fn literal(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+fn literal(parser: &mut Parser<'_>, _can_assign: bool) {
+    let line = parser.previous.line;
     match parser.previous.kind {
         TokenType::False => {
-            chunk.write_constant(Value::Bool(false), parser.previous.line);
+            parser.current_chunk().write_constant(Value::Bool(false), line);
         }
         TokenType::True => {
-            chunk.write_constant(Value::Bool(true), parser.previous.line);
+            parser.current_chunk().write_constant(Value::Bool(true), line);
         }
         TokenType::Nil => {
-            chunk.write_constant(Value::Nil, parser.previous.line);
+            parser.current_chunk().write_constant(Value::Nil, line);
         }
         _ => parser.error_at_previous("Unsupported literal."),
     }
 }
 
-fn variable(parser: &mut Parser<'_>, chunk: &mut Chunk, can_assign: bool) {
+fn variable(parser: &mut Parser<'_>, can_assign: bool) {
     let name = parser.previous;
-    parser.named_variable(chunk, name, can_assign);
+    parser.named_variable(name, can_assign);
 }
 
-fn and_(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+fn and_(parser: &mut Parser<'_>, _can_assign: bool) {
     // Left operand is already on the stack
     // Short-circuit: if falsey, skip right operand
-    let end_jump = parser.emit_jump(chunk, Instruction::JumpIfFalse(0));
+    let end_jump = parser.emit_jump(Instruction::JumpIfFalse(0));
 
-    chunk.write(Instruction::Pop, parser.previous.line); // Pop left operand if truthy
-    parser.parse_precedence(chunk, Precedence::And);
+    let line = parser.previous.line;
+    parser.current_chunk().write(Instruction::Pop, line); // Pop left operand if truthy
+    parser.parse_precedence(Precedence::And);
 
-    parser.patch_jump(chunk, end_jump);
+    parser.patch_jump(end_jump);
     // If we jumped, the falsey left operand is still on stack as the result
     // If we didn't jump, the right operand is now on stack as the result
 }
 
-fn or_(parser: &mut Parser<'_>, chunk: &mut Chunk, _can_assign: bool) {
+fn or_(parser: &mut Parser<'_>, _can_assign: bool) {
     // Left operand already on the stack
     // Short-circuit: if falsey, evaluate right; if truthy, skip right
-    let else_jump = parser.emit_jump(chunk, Instruction::JumpIfFalse(0));
-    let end_jump = parser.emit_jump(chunk, Instruction::Jump(0));
+    let else_jump = parser.emit_jump(Instruction::JumpIfFalse(0));
+    let end_jump = parser.emit_jump(Instruction::Jump(0));
 
-    parser.patch_jump(chunk, else_jump);
-    chunk.write(Instruction::Pop, parser.previous.line); // Pop left operand if falsey
+    parser.patch_jump(else_jump);
+    let line = parser.previous.line;
+    parser.current_chunk().write(Instruction::Pop, line); // Pop left operand if falsey
 
-    parser.parse_precedence(chunk, Precedence::Or);
+    parser.parse_precedence(Precedence::Or);
 
-    parser.patch_jump(chunk, end_jump);
+    parser.patch_jump(end_jump);
     // If left truthy, we jumped to end with it still on stack
     // If left falsey, we popped it and right operand is now on stack
 }

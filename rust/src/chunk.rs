@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 use std::rc::Rc;
 
+use crate::object::{LoxFunction, NativeFunction};
+
 /// Op code instructions
 #[derive(Debug, Copy, Clone)]
 pub enum Instruction {
@@ -39,15 +41,34 @@ pub enum Instruction {
     Jump(u16),        // Unconditional forward jump by offset
     JumpIfFalse(u16), // Jump if top of stack is falsey (does not pop)
     Loop(u16),        // Unconditional backward jump by offset
+    // Function call instruction
+    Call(u8),         // Call a function with the given number of arguments
 }
 
 /// Values of the language
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
     Bool(bool),
     Nil,
     String(Rc<String>),
+    Function(Rc<LoxFunction>),
+    NativeFunction(Rc<NativeFunction>),
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Nil, Value::Nil) => true,
+            (Value::String(a), Value::String(b)) => a == b,
+            // Functions are equal only if they are the same object (pointer equality)
+            (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
+            (Value::NativeFunction(a), Value::NativeFunction(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
 }
 
 /// Chunk of bytecode instructions and constants
@@ -121,15 +142,28 @@ impl Chunk {
     }
 }
 
+impl Default for Chunk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Debug for Chunk {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Chunk:")?;
-        for op_code in &self.code {
+        for (i, op_code) in self.code.iter().enumerate() {
+            let line = self.lines.get(i).unwrap_or(&0);
             match op_code {
                 Instruction::Constant(index) => {
-                    writeln!(f, "{:?} {:?}", op_code, self.constants.get(*index as usize))?;
+                    writeln!(f, "{:04} {:4} {:?} {:?}", i, line, op_code, self.constants.get(*index))?;
                 }
-                _ => writeln!(f, "{:?}", op_code)?,
+                Instruction::DefineGlobal(index) | Instruction::GetGlobal(index) | Instruction::SetGlobal(index) => {
+                    writeln!(f, "{:04} {:4} {:?} {:?}", i, line, op_code, self.constants.get(*index))?;
+                }
+                Instruction::Call(arg_count) => {
+                    writeln!(f, "{:04} {:4} {:?} ({} args)", i, line, op_code, arg_count)?;
+                }
+                _ => writeln!(f, "{:04} {:4} {:?}", i, line, op_code)?,
             }
         }
         Ok(())
