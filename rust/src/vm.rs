@@ -4,10 +4,12 @@ use std::fmt;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use miette::NamedSource;
+
 use crate::{
     LoxResult,
     chunk::{Chunk, Instruction, Instruction::*, Value},
-    error::LoxError,
+    error::{LoxError, RuntimeError},
     object::{LoxClosure, LoxFunction, LoxUpvalue, NativeFunction, StringInterner},
 };
 
@@ -62,6 +64,8 @@ pub struct VirtualMachine {
     open_upvalues: Option<Rc<RefCell<LoxUpvalue>>>,
     /// Indicates if the virtual machine is in debug mode
     debug: bool,
+    /// Source code for error reporting
+    source: Option<NamedSource<String>>,
 }
 
 impl VirtualMachine {
@@ -73,6 +77,7 @@ impl VirtualMachine {
             globals: HashMap::new(),
             open_upvalues: None,
             debug,
+            source: None,
         };
 
         // Define native functions
@@ -108,7 +113,7 @@ impl VirtualMachine {
 
         let instruction = match instruction {
             Some(i) => i,
-            None => return Err(LoxError::RuntimeError("Out of bounds instruction.".into())),
+            None => return Err(self.runtime_error("Out of bounds instruction.")),
         };
 
         // Print debug information if in debug mode
@@ -150,14 +155,14 @@ impl VirtualMachine {
             GetGlobal(idx) => {
                 let name = self.read_string(idx)?;
                 let value = self.globals.get(&name).ok_or_else(|| {
-                    LoxError::RuntimeError(format!("Undefined variable '{}'.", name))
+                    self.runtime_error(&format!("Undefined variable '{}'.", name))
                 })?;
                 self.push(value.clone());
             }
             SetGlobal(idx) => {
                 let name = self.read_string(idx)?;
                 if !self.globals.contains_key(&name) {
-                    return Err(LoxError::RuntimeError(format!(
+                    return Err(self.runtime_error(&format!(
                         "Undefined variable '{}'.",
                         name
                     )));
@@ -211,14 +216,14 @@ impl VirtualMachine {
                     .current_frame()
                     .chunk()
                     .constant(idx)
-                    .ok_or(LoxError::RuntimeError("No such constant.".into()))?
+                    .ok_or_else(|| self.runtime_error("No such constant."))?
                     .clone();
                 self.push(constant);
             }
             Closure(idx, ref upvalue_descs) => {
                 let function = match self.current_frame().chunk().constant(idx) {
                     Some(Value::Function(f)) => f.clone(),
-                    _ => return Err(LoxError::RuntimeError("Expected function constant.".into())),
+                    _ => return Err(self.runtime_error("Expected function constant.")),
                 };
 
                 let mut closure = LoxClosure::new(function);
@@ -243,7 +248,7 @@ impl VirtualMachine {
                 let value = self.pop();
                 match value {
                     Value::Number(num) => self.push(Value::Number(-num)),
-                    _ => return Err(LoxError::RuntimeError("Operand must be a number.".into())),
+                    _ => return Err(self.runtime_error("Operand must be a number.")),
                 }
             }
             Add => {
@@ -258,7 +263,7 @@ impl VirtualMachine {
                         let interned = self.interner.intern(&concatenated);
                         self.push(Value::String(interned));
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be two numbers or two strings.".into())),
+                    _ => return Err(self.runtime_error("Operands must be two numbers or two strings.")),
                 }
             }
             Sub => {
@@ -268,7 +273,7 @@ impl VirtualMachine {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left - right))
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                    _ => return Err(self.runtime_error("Operands must be numbers.")),
                 }
             }
             Mul => {
@@ -278,7 +283,7 @@ impl VirtualMachine {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left * right))
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                    _ => return Err(self.runtime_error("Operands must be numbers.")),
                 }
             }
             Div => {
@@ -288,7 +293,7 @@ impl VirtualMachine {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Number(left / right))
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                    _ => return Err(self.runtime_error("Operands must be numbers.")),
                 }
             }
             Nil => self.push(Value::Nil),
@@ -310,7 +315,7 @@ impl VirtualMachine {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Bool(left > right))
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                    _ => return Err(self.runtime_error("Operands must be numbers.")),
                 }
             }
             Less => {
@@ -320,7 +325,7 @@ impl VirtualMachine {
                     (Value::Number(left), Value::Number(right)) => {
                         self.push(Value::Bool(left < right))
                     }
-                    _ => return Err(LoxError::RuntimeError("Operands must be numbers.".into())),
+                    _ => return Err(self.runtime_error("Operands must be numbers.")),
                 }
             }
             Instruction::Jump(offset) => {
@@ -469,23 +474,40 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// Generate a runtime error with stack trace
+    /// Generate a runtime error with stack trace and source information
     fn runtime_error(&self, message: &str) -> LoxError {
-        let mut trace = String::new();
-        trace.push_str(&format!("{}\n", message));
+        // Get the current instruction's location info
+        let frame = self.current_frame();
+        let ip = frame.ip.saturating_sub(1);
+        let line = *frame.chunk().lines.get(ip).unwrap_or(&0);
+        let span = frame.chunk().span(ip).unwrap_or((0, 0));
 
+        // Build stack trace
+        let mut stack_trace = String::new();
+        stack_trace.push_str("Stack trace:\n");
         for frame in self.frames.iter().rev() {
             let function = &frame.closure.function;
-            let line = function.chunk.lines.get(frame.ip.saturating_sub(1)).unwrap_or(&0);
+            let frame_line = function.chunk.lines.get(frame.ip.saturating_sub(1)).unwrap_or(&0);
 
             let name = match &function.name {
                 Some(n) => format!("{}()", n),
                 None => "script".to_string(),
             };
-            trace.push_str(&format!("[line {}] in {}\n", line, name));
+            stack_trace.push_str(&format!("  [line {}] in {}\n", frame_line, name));
         }
 
-        LoxError::RuntimeError(trace)
+        // Create runtime error with source if available
+        let error = RuntimeError::new(message, span, line)
+            .with_stack_trace(stack_trace);
+
+        // Attach source if available
+        let error = if let Some(ref source) = self.source {
+            error.with_source(source.clone())
+        } else {
+            error
+        };
+
+        LoxError::RuntimeError(error)
     }
 
     /// Interprets a compiled function
@@ -493,6 +515,9 @@ impl VirtualMachine {
     /// @return Result indicating if the function was successfully interpreted
     pub fn interpret(function: LoxFunction) -> LoxResult<Value> {
         let mut vm = Self::new(false);
+
+        // Store source for error reporting
+        vm.source = function.source.clone();
 
         // Wrap the function in a closure
         let function_rc = Rc::new(function);
@@ -533,7 +558,7 @@ impl VirtualMachine {
     fn read_string(&self, idx: usize) -> Result<Rc<String>, LoxError> {
         match self.current_frame().chunk().constant(idx) {
             Some(Value::String(s)) => Ok(s.clone()),
-            _ => Err(LoxError::RuntimeError("Expected string constant.".into())),
+            _ => Err(self.runtime_error("Expected string constant.")),
         }
     }
 

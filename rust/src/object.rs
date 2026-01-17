@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::rc::Rc;
 
+use miette::NamedSource;
+
 use crate::chunk::{Chunk, Value};
 
 /// Represents a compiled Lox function
@@ -15,6 +17,8 @@ pub struct LoxFunction {
     pub chunk: Chunk,
     /// Function name (None for top-level script)
     pub name: Option<Rc<String>>,
+    /// Source code for error reporting (only stored on top-level script)
+    pub source: Option<NamedSource<String>>,
 }
 
 impl LoxFunction {
@@ -25,6 +29,7 @@ impl LoxFunction {
             upvalue_count: 0,
             chunk: Chunk::new(),
             name: None,
+            source: None,
         }
     }
 
@@ -35,7 +40,14 @@ impl LoxFunction {
             upvalue_count: 0,
             chunk: Chunk::new(),
             name: Some(name),
+            source: None,
         }
+    }
+
+    /// Attach source code for error reporting
+    pub fn with_source(mut self, source: NamedSource<String>) -> Self {
+        self.source = Some(source);
+        self
     }
 }
 

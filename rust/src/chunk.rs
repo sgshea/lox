@@ -87,6 +87,8 @@ pub struct Chunk {
     pub constants: Vec<Value>,
     // Line numbers of the code instructions
     pub lines: Vec<usize>,
+    // Source spans (start, end) for each instruction
+    pub spans: Vec<(usize, usize)>,
 }
 
 impl Chunk {
@@ -95,6 +97,7 @@ impl Chunk {
             code: Vec::new(),
             constants: Vec::new(),
             lines: Vec::new(),
+            spans: Vec::new(),
         }
     }
 
@@ -103,8 +106,18 @@ impl Chunk {
     // @param line - The line number of the instruction
     // @return The index of the instruction in the code vector
     pub fn write(&mut self, op_code: Instruction, line: usize) -> usize {
+        self.write_with_span(op_code, line, (0, 0))
+    }
+
+    // Write an instruction to the chunk with span information
+    // @param op_code - The instruction to write
+    // @param line - The line number of the instruction
+    // @param span - The source span (start, end) of the instruction
+    // @return The index of the instruction in the code vector
+    pub fn write_with_span(&mut self, op_code: Instruction, line: usize, span: (usize, usize)) -> usize {
         self.code.push(op_code);
         self.lines.push(line);
+        self.spans.push(span);
         self.code.len() - 1
     }
 
@@ -144,9 +157,23 @@ impl Chunk {
     /// @param line The line number to associate with the instructions
     /// @param instructions The instructions to emit
     pub fn emit_instructions(&mut self, line: usize, instructions: &[Instruction]) {
+        self.emit_instructions_with_span(line, (0, 0), instructions);
+    }
+
+    /// Emits a sequence of instructions to the chunk at the given line with span.
+    /// @param chunk The chunk to write the instructions to
+    /// @param line The line number to associate with the instructions
+    /// @param span The source span (start, end) for the instructions
+    /// @param instructions The instructions to emit
+    pub fn emit_instructions_with_span(&mut self, line: usize, span: (usize, usize), instructions: &[Instruction]) {
         for instruction in instructions {
-            self.write(instruction.clone(), line);
+            self.write_with_span(instruction.clone(), line, span);
         }
+    }
+
+    /// Get the span for an instruction at the given index
+    pub fn span(&self, index: usize) -> Option<(usize, usize)> {
+        self.spans.get(index).copied()
     }
 }
 
