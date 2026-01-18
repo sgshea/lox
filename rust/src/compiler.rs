@@ -122,6 +122,11 @@ impl ParseRule {
                 infix: None,
                 precedence: Precedence::None,
             },
+            Dot => Self {
+                prefix: None,
+                infix: Some(dot),
+                precedence: Precedence::Call,
+            },
             _ => Self {
                 prefix: None,
                 infix: None,
@@ -299,7 +304,9 @@ impl<'source> Parser<'source> {
     }
 
     fn declaration(&mut self) {
-        if self.match_token(TokenType::Fun) {
+        if self.match_token(TokenType::Class) {
+            self.class_declaration();
+        } else if self.match_token(TokenType::Fun) {
             self.fun_declaration();
         } else if self.match_token(TokenType::Var) {
             self.var_declaration();
@@ -318,6 +325,21 @@ impl<'source> Parser<'source> {
         self.mark_initialized();
         self.function(FunctionType::Function);
         self.define_variable(global);
+    }
+
+    fn class_declaration(&mut self) {
+        self.consume(TokenType::Identifier, "Expect class name.");
+        let class_name = self.previous;
+        let name_constant = self.identifier_constant(class_name);
+        self.declare_variable();
+
+        // Emit OP_CLASS instruction
+        self.emit_at(Instruction::Class(name_constant), class_name);
+        self.define_variable(name_constant);
+
+        // Parse class body
+        self.consume(TokenType::LeftBrace, "Expect '{' before class body.");
+        self.consume(TokenType::RightBrace, "Expect '}' after class body.");
     }
 
     fn function(&mut self, function_type: FunctionType) {
@@ -914,6 +936,18 @@ fn grouping(parser: &mut Parser, _can_assign: bool) {
 fn call(parser: &mut Parser, _can_assign: bool) {
     let arg_count = parser.argument_list();
     parser.emit(Instruction::Call(arg_count));
+}
+
+fn dot(parser: &mut Parser, can_assign: bool) {
+    parser.consume(TokenType::Identifier, "Expect property name after '.'.");
+    let name = parser.identifier_constant(parser.previous);
+
+    if can_assign && parser.match_token(TokenType::Equal) {
+        parser.expression();
+        parser.emit(Instruction::SetProperty(name));
+    } else {
+        parser.emit(Instruction::GetProperty(name));
+    }
 }
 
 fn unary(parser: &mut Parser, _can_assign: bool) {

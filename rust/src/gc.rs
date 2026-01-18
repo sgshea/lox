@@ -193,6 +193,8 @@ impl Gc {
             Value::Function(f) => self.mark_object(*f),
             Value::Closure(c) => self.mark_object(*c),
             Value::NativeFunction(n) => self.mark_object(*n),
+            Value::Class(c) => self.mark_object(*c),
+            Value::Instance(i) => self.mark_object(*i),
             _ => {} // Numbers, bools, nil have no references
         }
     }

@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 use crate::gc::GcRef;
-use crate::object::{LoxClosure, LoxFunction, CompilerFunction, NativeFunction, UpvalueDescriptor};
+use crate::object::{LoxClosure, LoxFunction, CompilerFunction, NativeFunction, UpvalueDescriptor, LoxClass, LoxInstance};
 
 /// Op code instructions
 #[derive(Debug, Clone)]
@@ -50,6 +50,10 @@ pub enum Instruction {
     Call(u8),         // Call a function with the given number of arguments
     // Closure creation
     Closure(usize, Vec<UpvalueDescriptor>), // Create closure from function constant with upvalue descriptors
+    // Class and instance operations
+    Class(usize),        // Create class from name constant at index
+    GetProperty(usize),  // Get property with name from constant at index
+    SetProperty(usize),  // Set property with name from constant at index
 }
 
 /// Values of the language
@@ -63,6 +67,8 @@ pub enum Value {
     Function(GcRef<LoxFunction>),
     Closure(GcRef<LoxClosure>),
     NativeFunction(GcRef<NativeFunction>),
+    Class(GcRef<LoxClass>),
+    Instance(GcRef<LoxInstance>),
     // Compiler-time variants (Rc-managed, converted to GC at runtime)
     CompilerString(Rc<String>),
     CompilerFunction(Rc<CompilerFunction>),
@@ -79,6 +85,8 @@ impl PartialEq for Value {
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Closure(a), Value::Closure(b)) => a == b,
             (Value::NativeFunction(a), Value::NativeFunction(b)) => a == b,
+            (Value::Class(a), Value::Class(b)) => a == b,
+            (Value::Instance(a), Value::Instance(b)) => a == b,
             // Compiler variants - compare Rc pointer equality
             (Value::CompilerString(a), Value::CompilerString(b)) => Rc::ptr_eq(a, b),
             (Value::CompilerFunction(a), Value::CompilerFunction(b)) => Rc::ptr_eq(a, b),
@@ -222,8 +230,9 @@ impl Debug for Chunk {
                 }
                 Instruction::CloseUpvalue => {
                     writeln!(f, "{:04} {:4} CloseUpvalue", i, line)?;
-                }
-                _ => writeln!(f, "{:04} {:4} {:?}", i, line, op_code)?,
+                }                Instruction::Class(index) | Instruction::GetProperty(index) | Instruction::SetProperty(index) => {
+                    writeln!(f, "{:04} {:4} {:?} {:?}", i, line, op_code, self.constants.get(*index))?
+                }                _ => writeln!(f, "{:04} {:4} {:?}", i, line, op_code)?,
             }
         }
         Ok(())

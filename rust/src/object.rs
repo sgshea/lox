@@ -216,6 +216,59 @@ pub struct StringInterner {
     strings: std::collections::HashSet<std::rc::Rc<String>>,
 }
 
+/// Represents a Lox class
+pub struct LoxClass {
+    /// The class name
+    pub name: GcRef<String>,
+}
+
+impl LoxClass {
+    pub fn new(name: GcRef<String>) -> Self {
+        Self { name }
+    }
+}
+
+impl fmt::Display for LoxClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<class>")
+    }
+}
+
+impl fmt::Debug for LoxClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<class>")
+    }
+}
+
+/// Represents an instance of a Lox class
+pub struct LoxInstance {
+    /// The class this is an instance of
+    pub klass: GcRef<LoxClass>,
+    /// Instance fields (property name -> value)
+    pub fields: std::collections::HashMap<GcRef<String>, Value>,
+}
+
+impl LoxInstance {
+    pub fn new(klass: GcRef<LoxClass>) -> Self {
+        Self {
+            klass,
+            fields: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl fmt::Display for LoxInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<instance>")
+    }
+}
+
+impl fmt::Debug for LoxInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<instance>")
+    }
+}
+
 impl StringInterner {
     /// Creates a new empty string interner
     pub fn new() -> Self {
@@ -338,6 +391,41 @@ impl GcTrace for LoxUpvalue {
 impl GcTrace for NativeFunction {
     fn trace(&self, _gc: &mut Gc) {
         // Native functions contain no GC references
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl GcTrace for LoxClass {
+    fn trace(&self, gc: &mut Gc) {
+        // Mark the class name
+        gc.mark_object(self.name);
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl GcTrace for LoxInstance {
+    fn trace(&self, gc: &mut Gc) {
+        // Mark the class
+        gc.mark_object(self.klass);
+        // Mark all field keys and values
+        for (&key, value) in &self.fields {
+            gc.mark_object(key);
+            gc.mark_value(value);
+        }
     }
     
     fn as_any(&self) -> &dyn Any {

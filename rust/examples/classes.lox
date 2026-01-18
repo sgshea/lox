@@ -1,0 +1,24 @@
+// Test 1: Basic class declaration and printing
+class Brioche {}
+print Brioche;
+
+// Test 2: Instance creation
+print Brioche();
+
+// Test 3: Property access
+class Pair {}
+var pair = Pair();
+pair.first = 1;
+pair.second = 2;
+print pair.first + pair.second;
+
+// Test 4: Property assignment is an expression
+class Toast {}
+var toast = Toast();
+print toast.jam = "grape";
+
+// Test 5: Nested property assignment
+class Nested {}
+var obj = Nested();
+obj.value = 42;
+print obj.value;

@@ -160,6 +160,17 @@ impl VirtualMachine {
                 let native = self.gc.deref(*gc_ref);
                 format!("<native fn {}>", native.name)
             }
+            Value::Class(gc_ref) => {
+                let class = self.gc.deref(*gc_ref);
+                let name = self.gc.deref(class.name);
+                format!("{}", name)
+            }
+            Value::Instance(gc_ref) => {
+                let instance = self.gc.deref(*gc_ref);
+                let class = self.gc.deref(instance.klass);
+                let name = self.gc.deref(class.name);
+                format!("{} instance", name)
+            }
             Value::CompilerString(s) => format!("{}", s),
             Value::CompilerFunction(_) => "<fn>".to_string(),
         }
@@ -455,6 +466,48 @@ impl VirtualMachine {
                 let callee = self.peek(arg_count as usize).clone();
                 self.call_value(callee, arg_count)?;
             }
+            Instruction::Class(idx) => {
+                self.maybe_collect();
+                let name = self.read_string(idx)?;
+                let class = crate::object::LoxClass::new(name);
+                let class_ref = self.gc.alloc(class)
+                    .map_err(|_| self.runtime_error("Out of memory."))?;
+                self.push(Value::Class(class_ref));
+            }
+            Instruction::GetProperty(idx) => {
+                if let Value::Instance(instance_ref) = self.peek(0).clone() {
+                    let name = self.read_string(idx)?;
+                    let instance = self.gc.deref(instance_ref);
+                    
+                    if let Some(value) = instance.fields.get(&name) {
+                        let value = value.clone();
+                        self.pop();
+                        self.push(value);
+                    } else {
+                        let name_str = self.gc.deref(name);
+                        return Err(self.runtime_error(&format!(
+                            "Undefined property '{}'.", name_str
+                        )));
+                    }
+                } else {
+                    return Err(self.runtime_error("Only instances have properties."));
+                }
+            }
+            Instruction::SetProperty(idx) => {
+                if let Value::Instance(instance_ref) = self.peek(1).clone() {
+                    let name = self.read_string(idx)?;
+                    let value = self.peek(0).clone();
+                    
+                    let instance = self.gc.deref_mut(instance_ref);
+                    instance.fields.insert(name, value.clone());
+                    
+                    let value = self.pop();
+                    self.pop();
+                    self.push(value);
+                } else {
+                    return Err(self.runtime_error("Only instances have fields."));
+                }
+            }
         };
 
         Ok(None)
@@ -542,6 +595,17 @@ impl VirtualMachine {
         match callee {
             Value::Closure(closure) => self.call(closure, arg_count),
             Value::NativeFunction(native) => self.call_native(native, arg_count),
+            Value::Class(class) => {
+                // Create a new instance
+                self.maybe_collect();
+                let instance = crate::object::LoxInstance::new(class);
+                let instance_ref = self.gc.alloc(instance)
+                    .map_err(|_| self.runtime_error("Out of memory."))?;
+                // Replace the class on the stack with the instance
+                let stack_slot = self.stack.len() - arg_count as usize - 1;
+                self.stack[stack_slot] = Value::Instance(instance_ref);
+                Ok(())
+            }
             _ => Err(self.runtime_error("Can only call functions and classes.")),
         }
     }
@@ -673,7 +737,7 @@ impl VirtualMachine {
                 Value::Bool(b) => Value::Bool(*b),
                 Value::Nil => Value::Nil,
                 // Runtime variants shouldn't appear in compiler output
-                Value::String(_) | Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => {
+                Value::String(_) | Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) | Value::Class(_) | Value::Instance(_) => {
                     return Err(GcError);
                 }
             };
@@ -798,6 +862,8 @@ impl fmt::Display for Value {
             Value::Function(_) => write!(f, "<fn>"),
             Value::Closure(_) => write!(f, "<closure>"),
             Value::NativeFunction(_) => write!(f, "<native fn>"),
+            Value::Class(_) => write!(f, "<class>"),
+            Value::Instance(_) => write!(f, "<instance>"),
             Value::CompilerString(s) => write!(f, "{}", s),
             Value::CompilerFunction(_) => write!(f, "<fn>"),
         }
