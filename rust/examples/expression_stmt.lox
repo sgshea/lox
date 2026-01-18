@@ -1,8 +1,0 @@
-// Expression statements. evaluate an expression and discard the result
-// This should run without errors, even though the results are discarded
-
-1 + 2;
-3 * 4;
-"hello" + " world";
-true;
-nil;

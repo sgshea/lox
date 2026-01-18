@@ -1,7 +1,5 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use miette::NamedSource;
@@ -10,7 +8,8 @@ use crate::{
     LoxResult,
     chunk::{Chunk, Instruction, Instruction::*, Value},
     error::{LoxError, RuntimeError},
-    object::{LoxClosure, LoxFunction, LoxUpvalue, NativeFunction, StringInterner},
+    gc::{Gc, GcError, GcRef},
+    object::{CompilerFunction, LoxClosure, LoxFunction, LoxUpvalue, NativeFunction},
 };
 
 /// Maximum number of call frames (stack depth)
@@ -19,7 +18,7 @@ const FRAMES_MAX: usize = 64;
 /// Represents a single function call's execution context
 struct CallFrame {
     /// The closure being executed
-    closure: Rc<LoxClosure>,
+    closure: GcRef<LoxClosure>,
     /// Instruction pointer into the closure's function's chunk
     ip: usize,
     /// Base index into the VM's value stack for this frame's slots
@@ -27,7 +26,7 @@ struct CallFrame {
 }
 
 impl CallFrame {
-    fn new(closure: Rc<LoxClosure>, slot_offset: usize) -> Self {
+    fn new(closure: GcRef<LoxClosure>, slot_offset: usize) -> Self {
         Self {
             closure,
             ip: 0,
@@ -35,45 +34,38 @@ impl CallFrame {
         }
     }
 
-    /// Read the current instruction and advance ip
-    fn read_instruction(&mut self) -> Option<&Instruction> {
-        let instruction = self.closure.function.chunk.instruction(self.ip);
-        if instruction.is_some() {
-            self.ip += 1;
-        }
-        instruction
-    }
-
     /// Get the current chunk
-    fn chunk(&self) -> &Chunk {
-        &self.closure.function.chunk
+    fn chunk<'a>(&self, gc: &'a Gc) -> &'a Chunk {
+        let closure = gc.deref(self.closure);
+        let function = gc.deref(closure.function);
+        &function.chunk
     }
 }
 
 /// Virtual machine for executing bytecode instructions
 pub struct VirtualMachine {
+    /// Garbage collector
+    gc: Gc,
     /// Call stack of frames
     frames: Vec<CallFrame>,
     /// Stack of values
     stack: Vec<Value>,
-    /// String interner for deduplicating strings
-    interner: StringInterner,
     /// Global variables table
-    globals: HashMap<Rc<String>, Value>,
+    globals: HashMap<GcRef<String>, Value>,
     /// Head of the open upvalues linked list (sorted by stack index, descending)
-    open_upvalues: Option<Rc<RefCell<LoxUpvalue>>>,
+    open_upvalues: Option<GcRef<LoxUpvalue>>,
     /// Indicates if the virtual machine is in debug mode
     debug: bool,
-    /// Source code for error reporting
+    /// Source for error reporting
     source: Option<NamedSource<String>>,
 }
 
 impl VirtualMachine {
     pub fn new(debug: bool) -> Self {
         let mut vm = Self {
+            gc: Gc::new(),
             frames: Vec::with_capacity(FRAMES_MAX),
             stack: Vec::new(),
-            interner: StringInterner::new(),
             globals: HashMap::new(),
             open_upvalues: None,
             debug,
@@ -88,8 +80,89 @@ impl VirtualMachine {
     /// Define a native function in the global scope
     fn define_native(&mut self, name: &'static str, arity: u8, function: crate::object::NativeFn) {
         let native = NativeFunction::new(name, arity, function);
-        let name_rc = self.interner.intern(name);
-        self.globals.insert(name_rc, Value::NativeFunction(Rc::new(native)));
+        let name_gc = self.gc.intern(name).expect("Failed to intern native function name");
+        let native_gc = self.gc.alloc(native).expect("Failed to allocate native function");
+        self.globals.insert(name_gc, Value::NativeFunction(native_gc));
+    }
+
+    /// Check if GC should run and trigger collection if needed
+    fn maybe_collect(&mut self) {
+        if self.gc.should_gc() {
+            self.mark_roots();
+            self.gc.collect_garbage();
+        }
+    }
+
+    /// Mark all roots for garbage collection
+    fn mark_roots(&mut self) {
+        // Mark stack values
+        for value in &self.stack {
+            self.gc.mark_value(value);
+        }
+        
+        // Mark globals table
+        for (&key, value) in &self.globals {
+            self.gc.mark_object(key);
+            self.gc.mark_value(value);
+        }
+        
+        // Mark call frames (closures)
+        for frame in &self.frames {
+            self.gc.mark_object(frame.closure);
+        }
+        
+        // Mark open upvalues chain
+        let mut current = self.open_upvalues;
+        while let Some(uv_ref) = current {
+            self.gc.mark_object(uv_ref);
+            let upvalue = self.gc.deref(uv_ref);
+            current = upvalue.next;
+        }
+    }
+
+    /// Format a value for display, dereferencing GC references
+    fn format_value(&self, value: &Value) -> String {
+        match value {
+            Value::Number(n) => {
+                // Print numbers without trailing .0 if they're integers
+                if n.fract() == 0.0 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
+            }
+            Value::Bool(b) => format!("{}", b),
+            Value::Nil => "nil".to_string(),
+            Value::String(gc_ref) => {
+                let s = self.gc.deref(*gc_ref);
+                format!("{}", s)
+            }
+            Value::Function(gc_ref) => {
+                let func = self.gc.deref(*gc_ref);
+                if let Some(name_ref) = func.name {
+                    let name = self.gc.deref(name_ref);
+                    format!("<fn {}>", name)
+                } else {
+                    "<fn script>".to_string()
+                }
+            }
+            Value::Closure(gc_ref) => {
+                let closure = self.gc.deref(*gc_ref);
+                let func = self.gc.deref(closure.function);
+                if let Some(name_ref) = func.name {
+                    let name = self.gc.deref(name_ref);
+                    format!("<fn {}>", name)
+                } else {
+                    "<fn script>".to_string()
+                }
+            }
+            Value::NativeFunction(gc_ref) => {
+                let native = self.gc.deref(*gc_ref);
+                format!("<native fn {}>", native.name)
+            }
+            Value::CompilerString(s) => format!("{}", s),
+            Value::CompilerFunction(_) => "<fn>".to_string(),
+        }
     }
 
     /// Get the current call frame
@@ -106,9 +179,25 @@ impl VirtualMachine {
     /// @return Result indicating if there is more bytecode to interpret
     fn interpret_next(&mut self) -> Result<Option<Value>, LoxError> {
         // Get instruction from current frame
+        // We need to carefully manage borrows here
         let instruction = {
-            let frame = self.current_frame_mut();
-            frame.read_instruction().cloned()
+            // Get the closure and IP from the frame
+            let frame = self.current_frame();
+            let closure_ref = frame.closure;
+            let ip = frame.ip;
+            
+            // Now read the instruction using immutable borrows
+            let closure = self.gc.deref(closure_ref);
+            let function = self.gc.deref(closure.function);
+            let instruction = function.chunk.instruction(ip).cloned();
+            
+            // Advance IP if we got an instruction
+            if instruction.is_some() {
+                let frame_mut = self.current_frame_mut();
+                frame_mut.ip += 1;
+            }
+            
+            instruction
         };
 
         let instruction = match instruction {
@@ -145,7 +234,8 @@ impl VirtualMachine {
             }
             Print => {
                 let value = self.pop();
-                println!("{}", value);
+                let formatted = self.format_value(&value);
+                println!("{}", formatted);
             }
             DefineGlobal(idx) => {
                 let name = self.read_string(idx)?;
@@ -155,16 +245,18 @@ impl VirtualMachine {
             GetGlobal(idx) => {
                 let name = self.read_string(idx)?;
                 let value = self.globals.get(&name).ok_or_else(|| {
-                    self.runtime_error(&format!("Undefined variable '{}'.", name))
+                    let name_str = self.gc.deref(name);
+                    self.runtime_error(&format!("Undefined variable '{}'.", name_str))
                 })?;
                 self.push(value.clone());
             }
             SetGlobal(idx) => {
                 let name = self.read_string(idx)?;
                 if !self.globals.contains_key(&name) {
+                    let name_str = self.gc.deref(name);
                     return Err(self.runtime_error(&format!(
                         "Undefined variable '{}'.",
-                        name
+                        name_str
                     )));
                 }
                 let value = self.peek(0).clone();
@@ -181,29 +273,33 @@ impl VirtualMachine {
                 self.stack[slot_offset + slot] = value;
             }
             GetUpvalue(slot) => {
-                let upvalue = self.current_frame().closure.upvalues[slot as usize].clone();
-                let value = {
-                    let uv = upvalue.borrow();
-                    if let Some(stack_idx) = uv.location {
-                        // Open upvalue - read from stack
-                        self.stack[stack_idx].clone()
-                    } else {
-                        // Closed upvalue - read stored value
-                        uv.closed.clone()
-                    }
+                let frame = self.current_frame();
+                let closure = self.gc.deref(frame.closure);
+                let upvalue_ref = closure.upvalues[slot as usize];
+                let upvalue = self.gc.deref(upvalue_ref);
+                
+                let value = if let Some(stack_idx) = upvalue.location {
+                    // Open upvalue - read from stack
+                    self.stack[stack_idx].clone()
+                } else {
+                    // Closed upvalue - read stored value
+                    upvalue.closed.clone()
                 };
                 self.push(value);
             }
             SetUpvalue(slot) => {
                 let value = self.peek(0).clone();
-                let upvalue = self.current_frame().closure.upvalues[slot as usize].clone();
-                let mut uv = upvalue.borrow_mut();
-                if let Some(stack_idx) = uv.location {
+                let frame = self.current_frame();
+                let closure = self.gc.deref(frame.closure);
+                let upvalue_ref = closure.upvalues[slot as usize];
+                let upvalue = self.gc.deref_mut(upvalue_ref);
+                
+                if let Some(stack_idx) = upvalue.location {
                     // Open upvalue - write to stack
                     self.stack[stack_idx] = value;
                 } else {
                     // Closed upvalue - write to stored value
-                    uv.closed = value;
+                    upvalue.closed = value;
                 }
             }
             CloseUpvalue => {
@@ -212,17 +308,20 @@ impl VirtualMachine {
                 self.pop();
             }
             Constant(idx) => {
-                let constant = self
-                    .current_frame()
-                    .chunk()
-                    .constant(idx)
-                    .ok_or_else(|| self.runtime_error("No such constant."))?
-                    .clone();
-                self.push(constant);
+                let frame = self.current_frame();
+                let chunk = frame.chunk(&self.gc);
+                let constant = chunk.constant(idx)
+                    .ok_or_else(|| self.runtime_error("No such constant."))?;
+                self.push(constant.clone());
             }
             Closure(idx, ref upvalue_descs) => {
-                let function = match self.current_frame().chunk().constant(idx) {
-                    Some(Value::Function(f)) => f.clone(),
+                // Trigger GC before allocation
+                self.maybe_collect();
+                
+                let frame = self.current_frame();
+                let chunk = frame.chunk(&self.gc);
+                let function = match chunk.constant(idx) {
+                    Some(Value::Function(f)) => *f,
                     _ => return Err(self.runtime_error("Expected function constant.")),
                 };
 
@@ -234,15 +333,19 @@ impl VirtualMachine {
                         // Capture local from enclosing function
                         let slot_offset = self.current_frame().slot_offset;
                         let stack_index = slot_offset + desc.index as usize;
-                        self.capture_upvalue(stack_index)
+                        self.capture_upvalue(stack_index)?
                     } else {
                         // Capture upvalue from enclosing closure
-                        self.current_frame().closure.upvalues[desc.index as usize].clone()
+                        let frame = self.current_frame();
+                        let closure_ref = self.gc.deref(frame.closure);
+                        closure_ref.upvalues[desc.index as usize]
                     };
                     closure.upvalues.push(upvalue);
                 }
 
-                self.push(Value::Closure(Rc::new(closure)));
+                let closure_ref = self.gc.alloc(closure)
+                    .map_err(|_| self.runtime_error("Out of memory."))?;
+                self.push(Value::Closure(closure_ref));
             }
             Negate => {
                 let value = self.pop();
@@ -259,8 +362,14 @@ impl VirtualMachine {
                         self.push(Value::Number(left + right))
                     }
                     (Value::String(left), Value::String(right)) => {
-                        let concatenated = format!("{}{}", left, right);
-                        let interned = self.interner.intern(&concatenated);
+                        // Trigger GC before allocation
+                        self.maybe_collect();
+                        
+                        let left_str = self.gc.deref(*left);
+                        let right_str = self.gc.deref(*right);
+                        let concatenated = format!("{}{}", left_str, right_str);
+                        let interned = self.gc.intern(&concatenated)
+                            .map_err(|_| self.runtime_error("Out of memory."))?;
                         self.push(Value::String(interned));
                     }
                     _ => return Err(self.runtime_error("Operands must be two numbers or two strings.")),
@@ -352,26 +461,25 @@ impl VirtualMachine {
     }
 
     /// Captures a local variable, reusing existing upvalue if one exists
-    fn capture_upvalue(&mut self, stack_index: usize) -> Rc<RefCell<LoxUpvalue>> {
+    fn capture_upvalue(&mut self, stack_index: usize) -> Result<GcRef<LoxUpvalue>, LoxError> {
         // Walk the open upvalues list looking for one that captures this slot
-        let mut prev: Option<Rc<RefCell<LoxUpvalue>>> = None;
-        let mut current = self.open_upvalues.clone();
+        let mut prev: Option<GcRef<LoxUpvalue>> = None;
+        let mut current = self.open_upvalues;
 
         loop {
-            let upvalue_rc = match current {
-                Some(ref rc) => rc.clone(),
+            let upvalue_ref = match current {
+                Some(ref_val) => ref_val,
                 None => break,
             };
 
-            let (loc, next) = {
-                let upvalue = upvalue_rc.borrow();
-                (upvalue.location, upvalue.next.clone())
-            };
+            let upvalue = self.gc.deref(upvalue_ref);
+            let loc = upvalue.location;
+            let next = upvalue.next;
 
             if let Some(l) = loc {
                 if l == stack_index {
                     // Found existing upvalue for this slot
-                    return upvalue_rc;
+                    return Ok(upvalue_ref);
                 }
                 if l < stack_index {
                     // Passed the slot, not found
@@ -379,30 +487,35 @@ impl VirtualMachine {
                 }
             }
 
-            prev = Some(upvalue_rc);
+            prev = Some(upvalue_ref);
             current = next;
         }
 
+        // Trigger GC before allocation
+        self.maybe_collect();
+
         // Create new upvalue
-        let new_upvalue = Rc::new(RefCell::new(LoxUpvalue::new(stack_index)));
+        let new_upvalue = LoxUpvalue::new(stack_index);
+        let new_upvalue_ref = self.gc.alloc(new_upvalue)
+            .map_err(|_| self.runtime_error("Out of memory."))?;
 
         // Insert into list
-        new_upvalue.borrow_mut().next = current;
+        self.gc.deref_mut(new_upvalue_ref).next = current;
 
-        if let Some(prev_rc) = prev {
-            prev_rc.borrow_mut().next = Some(new_upvalue.clone());
+        if let Some(prev_ref) = prev {
+            self.gc.deref_mut(prev_ref).next = Some(new_upvalue_ref);
         } else {
-            self.open_upvalues = Some(new_upvalue.clone());
+            self.open_upvalues = Some(new_upvalue_ref);
         }
 
-        new_upvalue
+        Ok(new_upvalue_ref)
     }
 
     /// Closes all upvalues pointing to slots at or above the given index
     fn close_upvalues(&mut self, last: usize) {
-        while let Some(ref upvalue_rc) = self.open_upvalues.clone() {
-            let mut upvalue = upvalue_rc.borrow_mut();
-
+        while let Some(upvalue_ref) = self.open_upvalues {
+            let upvalue = self.gc.deref(upvalue_ref);
+            
             if let Some(loc) = upvalue.location {
                 if loc < last {
                     break;
@@ -410,10 +523,14 @@ impl VirtualMachine {
 
                 // Close this upvalue
                 let value = self.stack[loc].clone();
-                upvalue.close(value);
+                let next = upvalue.next;
+                
+                // Now mutate
+                let upvalue_mut = self.gc.deref_mut(upvalue_ref);
+                upvalue_mut.close(value);
 
                 // Remove from open list
-                self.open_upvalues = upvalue.next.take();
+                self.open_upvalues = next;
             } else {
                 break;
             }
@@ -430,12 +547,15 @@ impl VirtualMachine {
     }
 
     /// Call a Lox closure
-    fn call(&mut self, closure: Rc<LoxClosure>, arg_count: u8) -> Result<(), LoxError> {
+    fn call(&mut self, closure: GcRef<LoxClosure>, arg_count: u8) -> Result<(), LoxError> {
         // Check arity
-        if arg_count != closure.function.arity {
+        let closure_obj = self.gc.deref(closure);
+        let function = self.gc.deref(closure_obj.function);
+        
+        if arg_count != function.arity {
             return Err(self.runtime_error(&format!(
                 "Expected {} arguments but got {}.",
-                closure.function.arity, arg_count
+                function.arity, arg_count
             )));
         }
 
@@ -453,19 +573,20 @@ impl VirtualMachine {
     }
 
     /// Call a native function
-    fn call_native(&mut self, native: Rc<NativeFunction>, arg_count: u8) -> Result<(), LoxError> {
+    fn call_native(&mut self, native: GcRef<NativeFunction>, arg_count: u8) -> Result<(), LoxError> {
         // Check arity
-        if arg_count != native.arity {
+        let native_obj = self.gc.deref(native);
+        if arg_count != native_obj.arity {
             return Err(self.runtime_error(&format!(
                 "Expected {} arguments but got {}.",
-                native.arity, arg_count
+                native_obj.arity, arg_count
             )));
         }
 
         let args_start = self.stack.len() - arg_count as usize;
         let result = {
             let args = &self.stack[args_start..];
-            (native.function)(args).map_err(|e| self.runtime_error(&e))?
+            (native_obj.function)(args).map_err(|e| self.runtime_error(&e))?
         };
 
         // Pop arguments and function
@@ -479,18 +600,23 @@ impl VirtualMachine {
         // Get the current instruction's location info
         let frame = self.current_frame();
         let ip = frame.ip.saturating_sub(1);
-        let line = *frame.chunk().lines.get(ip).unwrap_or(&0);
-        let span = frame.chunk().span(ip).unwrap_or((0, 0));
+        let chunk = frame.chunk(&self.gc);
+        let line = *chunk.lines.get(ip).unwrap_or(&0);
+        let span = chunk.span(ip).unwrap_or((0, 0));
 
         // Build stack trace
         let mut stack_trace = String::new();
         stack_trace.push_str("Stack trace:\n");
         for frame in self.frames.iter().rev() {
-            let function = &frame.closure.function;
+            let closure = self.gc.deref(frame.closure);
+            let function = self.gc.deref(closure.function);
             let frame_line = function.chunk.lines.get(frame.ip.saturating_sub(1)).unwrap_or(&0);
 
-            let name = match &function.name {
-                Some(n) => format!("{}()", n),
+            let name = match function.name {
+                Some(n) => {
+                    let name_str = self.gc.deref(n);
+                    format!("{}()", name_str)
+                }
                 None => "script".to_string(),
             };
             stack_trace.push_str(&format!("  [line {}] in {}\n", frame_line, name));
@@ -510,24 +636,92 @@ impl VirtualMachine {
         LoxError::RuntimeError(error)
     }
 
+    /// Convert a CompilerFunction (with Rc strings) to a runtime LoxFunction (with GcRef strings)
+    /// This recursively converts all string constants and nested function constants in the chunk
+    fn convert_function(cf: CompilerFunction, gc: &mut Gc) -> Result<LoxFunction, GcError> {
+        // Convert the function name
+        let name = match cf.name {
+            Some(rc_name) => Some(gc.intern(&rc_name)?),
+            None => None,
+        };
+
+        // Convert all constants in the chunk
+        let mut new_constants = Vec::new();
+        for constant in &cf.chunk.constants {
+            let new_constant = match constant {
+                Value::CompilerString(rc_str) => {
+                    // Intern the string in the GC
+                    let gc_str = gc.intern(rc_str.as_ref())?;
+                    Value::String(gc_str)
+                }
+                Value::CompilerFunction(rc_func) => {
+                    // Recursively convert nested function
+                    // First clone the CompilerFunction out of the Rc
+                    let nested_cf = CompilerFunction {
+                        arity: rc_func.arity,
+                        upvalue_count: rc_func.upvalue_count,
+                        chunk: rc_func.chunk.clone(),
+                        name: rc_func.name.clone(),
+                    };
+                    let nested_lf = Self::convert_function(nested_cf, gc)?;
+                    // Allocate it in the GC
+                    let gc_func = gc.alloc(nested_lf)?;
+                    Value::Function(gc_func)
+                }
+                // Copy other value types as-is
+                Value::Number(n) => Value::Number(*n),
+                Value::Bool(b) => Value::Bool(*b),
+                Value::Nil => Value::Nil,
+                // Runtime variants shouldn't appear in compiler output
+                Value::String(_) | Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => {
+                    return Err(GcError);
+                }
+            };
+            new_constants.push(new_constant);
+        }
+
+        let mut new_chunk = Chunk::new();
+        new_chunk.code = cf.chunk.code;
+        new_chunk.lines = cf.chunk.lines;
+        new_chunk.spans = cf.chunk.spans;
+        new_chunk.constants = new_constants;
+
+        Ok(LoxFunction {
+            arity: cf.arity,
+            upvalue_count: cf.upvalue_count,
+            chunk: new_chunk,
+            name,
+        })
+    }
+
     /// Interprets a compiled function
-    /// @param function The compiled function to execute
+    /// @param cf The compiled function to execute
     /// @return Result indicating if the function was successfully interpreted
-    pub fn interpret(function: LoxFunction) -> LoxResult<Value> {
+    pub fn interpret(cf: CompilerFunction) -> LoxResult<Value> {
         let mut vm = Self::new(false);
 
-        // Store source for error reporting
-        vm.source = function.source.clone();
+        // Convert compiler function to runtime function
+        let function = Self::convert_function(cf, &mut vm.gc)
+            .map_err(|_| vec![LoxError::RuntimeError(
+                RuntimeError::new("Out of memory during function conversion.", (0, 0), 0)
+            )])?;
 
-        // Wrap the function in a closure
-        let function_rc = Rc::new(function);
-        let closure = Rc::new(LoxClosure::new(function_rc));
+        // Allocate the function and wrap it in a closure
+        let function_ref = vm.gc.alloc(function)
+            .map_err(|_| vec![LoxError::RuntimeError(
+                RuntimeError::new("Out of memory.", (0, 0), 0)
+            )])?;
+        let closure = LoxClosure::new(function_ref);
+        let closure_ref = vm.gc.alloc(closure)
+            .map_err(|_| vec![LoxError::RuntimeError(
+                RuntimeError::new("Out of memory.", (0, 0), 0)
+            )])?;
 
         // Push the closure onto the stack
-        vm.push(Value::Closure(closure.clone()));
+        vm.push(Value::Closure(closure_ref));
 
         // Create initial call frame for the script closure
-        let frame = CallFrame::new(closure, 0);
+        let frame = CallFrame::new(closure_ref, 0);
         vm.frames.push(frame);
 
         loop {
@@ -555,9 +749,11 @@ impl VirtualMachine {
     }
 
     /// Reads a string constant from the current frame's chunk
-    fn read_string(&self, idx: usize) -> Result<Rc<String>, LoxError> {
-        match self.current_frame().chunk().constant(idx) {
-            Some(Value::String(s)) => Ok(s.clone()),
+    fn read_string(&self, idx: usize) -> Result<GcRef<String>, LoxError> {
+        let frame = self.current_frame();
+        let chunk = frame.chunk(&self.gc);
+        match chunk.constant(idx) {
+            Some(Value::String(s)) => Ok(*s),
             _ => Err(self.runtime_error("Expected string constant.")),
         }
     }
@@ -598,10 +794,12 @@ impl fmt::Display for Value {
             }
             Value::Bool(b) => write!(f, "{}", b),
             Value::Nil => write!(f, "nil"),
-            Value::String(s) => write!(f, "{}", s),
-            Value::Function(func) => write!(f, "{}", func),
-            Value::Closure(closure) => write!(f, "{}", closure),
-            Value::NativeFunction(native) => write!(f, "{}", native),
+            Value::String(_) => write!(f, "<string>"),
+            Value::Function(_) => write!(f, "<fn>"),
+            Value::Closure(_) => write!(f, "<closure>"),
+            Value::NativeFunction(_) => write!(f, "<native fn>"),
+            Value::CompilerString(s) => write!(f, "{}", s),
+            Value::CompilerFunction(_) => write!(f, "<fn>"),
         }
     }
 }

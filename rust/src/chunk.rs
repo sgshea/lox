@@ -1,7 +1,8 @@
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use crate::object::{LoxClosure, LoxFunction, NativeFunction, UpvalueDescriptor};
+use crate::gc::GcRef;
+use crate::object::{LoxClosure, LoxFunction, CompilerFunction, NativeFunction, UpvalueDescriptor};
 
 /// Op code instructions
 #[derive(Debug, Clone)]
@@ -57,10 +58,14 @@ pub enum Value {
     Number(f64),
     Bool(bool),
     Nil,
-    String(Rc<String>),
-    Function(Rc<LoxFunction>),
-    Closure(Rc<LoxClosure>),
-    NativeFunction(Rc<NativeFunction>),
+    // Runtime variants (GC-managed)
+    String(GcRef<String>),
+    Function(GcRef<LoxFunction>),
+    Closure(GcRef<LoxClosure>),
+    NativeFunction(GcRef<NativeFunction>),
+    // Compiler-time variants (Rc-managed, converted to GC at runtime)
+    CompilerString(Rc<String>),
+    CompilerFunction(Rc<CompilerFunction>),
 }
 
 impl PartialEq for Value {
@@ -71,15 +76,19 @@ impl PartialEq for Value {
             (Value::Nil, Value::Nil) => true,
             (Value::String(a), Value::String(b)) => a == b,
             // Functions are equal only if they are the same object (pointer equality)
-            (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
-            (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
-            (Value::NativeFunction(a), Value::NativeFunction(b)) => Rc::ptr_eq(a, b),
+            (Value::Function(a), Value::Function(b)) => a == b,
+            (Value::Closure(a), Value::Closure(b)) => a == b,
+            (Value::NativeFunction(a), Value::NativeFunction(b)) => a == b,
+            // Compiler variants - compare Rc pointer equality
+            (Value::CompilerString(a), Value::CompilerString(b)) => Rc::ptr_eq(a, b),
+            (Value::CompilerFunction(a), Value::CompilerFunction(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
 }
 
 /// Chunk of bytecode instructions and constants
+#[derive(Clone)]
 pub struct Chunk {
     // The code instructions from the input
     pub code: Vec<Instruction>,

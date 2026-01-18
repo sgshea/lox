@@ -5,7 +5,7 @@ use crate::{
     LoxError, LoxResult,
     chunk::{Chunk, Instruction, Value},
     error::ParseError,
-    object::{LoxFunction, StringInterner, UpvalueDescriptor},
+    object::{CompilerFunction, StringInterner, UpvalueDescriptor},
     scanner::{Scanner, Token, TokenType},
 };
 
@@ -161,7 +161,7 @@ struct Compiler<'source> {
     /// The enclosing compiler (for nested functions)
     enclosing: Option<Box<Compiler<'source>>>,
     /// The function being compiled
-    function: LoxFunction,
+    function: CompilerFunction,
     /// The type of function being compiled
     function_type: FunctionType,
     /// Local variables in scope
@@ -176,7 +176,7 @@ impl<'source> Compiler<'source> {
     fn new(function_type: FunctionType) -> Self {
         let mut compiler = Self {
             enclosing: None,
-            function: LoxFunction::new(),
+            function: CompilerFunction::new(),
             function_type,
             locals: Vec::new(),
             upvalues: Vec::new(),
@@ -211,7 +211,6 @@ impl<'source> Compiler<'source> {
 }
 
 pub struct Parser<'source> {
-    pub source_name: &'source str,
     pub scanner: Scanner<'source>,
 
     pub current: Token<'source>,
@@ -224,9 +223,8 @@ pub struct Parser<'source> {
 }
 
 impl<'source> Parser<'source> {
-    pub fn new(source_code: &'source str, source_name: &'source str) -> Self {
+    pub fn new(source_code: &'source str, _source_name: &'source str) -> Self {
         Self {
-            source_name,
             scanner: Scanner::new(source_code),
             current: Self::sentinel_token(),
             previous: Self::sentinel_token(),
@@ -371,12 +369,12 @@ impl<'source> Parser<'source> {
         self.compiler = *enclosing;
 
         // Emit the closure instruction with upvalue info
-        let constant = self.current_chunk().add_constant(Value::Function(Rc::new(function)));
+        let constant = self.current_chunk().add_constant(Value::CompilerFunction(Rc::new(function)));
         let line = self.previous.line;
         self.current_chunk().write(Instruction::Closure(constant, upvalue_descriptors), line);
     }
 
-    fn end_compiler(&mut self) -> LoxFunction {
+    fn end_compiler(&mut self) -> CompilerFunction {
         self.emit_return();
 
         // Set the upvalue count on the function
@@ -417,7 +415,7 @@ impl<'source> Parser<'source> {
 
     fn identifier_constant(&mut self, name: Token) -> usize {
         let name_string = self.interner.intern(name.lexeme);
-        self.current_chunk().add_constant(Value::String(name_string))
+        self.current_chunk().add_constant(Value::CompilerString(name_string))
     }
 
     fn declare_variable(&mut self) {
@@ -871,7 +869,7 @@ impl<'source> Parser<'source> {
 }
 
 /// Compiles source code into bytecode
-pub fn compile(source_code: &str, source_name: &str) -> LoxResult<LoxFunction> {
+pub fn compile(source_code: &str, source_name: &str) -> LoxResult<CompilerFunction> {
     let mut parser = Parser::new(source_code, source_name);
 
     parser.advance();
@@ -896,9 +894,7 @@ pub fn compile(source_code: &str, source_name: &str) -> LoxResult<LoxFunction> {
         }).collect();
         Err(errors)
     } else {
-        // Attach source to function for runtime error reporting
-        let source = NamedSource::new(source_name, source_code.to_string());
-        Ok(function.with_source(source))
+        Ok(function)
     }
 }
 
@@ -973,7 +969,7 @@ fn string(parser: &mut Parser, _can_assign: bool) {
     let interned = parser.interner.intern(string_value);
     let line = parser.previous.line;
     let span = parser.previous.span;
-    let idx = parser.current_chunk().add_constant(Value::String(interned));
+    let idx = parser.current_chunk().add_constant(Value::CompilerString(interned));
     parser.current_chunk().write_with_span(Instruction::Constant(idx), line, span);
 }
 
