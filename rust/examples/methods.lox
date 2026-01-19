@@ -1,0 +1,41 @@
+// Comprehensive test of methods and initializers
+
+class Circle {
+  init(radius) {
+    this.radius = radius;
+  }
+
+  area() {
+    return this.radius * this.radius * 3.14159;
+  }
+
+  describe() {
+    print "Circle with radius ";
+    print this.radius;
+  }
+}
+
+var c = Circle(5);
+c.describe();
+print c.area();
+
+// Test nested method calls
+class Stack {
+  init() {
+    this.items = 0;
+  }
+
+  push() {
+    this.items = this.items + 1;
+    return this.items;
+  }
+
+  size() {
+    return this.items;
+  }
+}
+
+var s = Stack();
+print s.push();
+print s.push();
+print s.size();

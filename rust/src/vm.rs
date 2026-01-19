@@ -9,7 +9,7 @@ use crate::{
     chunk::{Chunk, Instruction, Instruction::*, Value},
     error::{LoxError, RuntimeError},
     gc::{Gc, GcError, GcRef},
-    object::{CompilerFunction, LoxClosure, LoxFunction, LoxUpvalue, NativeFunction},
+    object::{CompilerFunction, LoxClosure, LoxClass, LoxFunction, LoxUpvalue, NativeFunction},
 };
 
 /// Maximum number of call frames (stack depth)
@@ -54,6 +54,8 @@ pub struct VirtualMachine {
     globals: HashMap<GcRef<String>, Value>,
     /// Head of the open upvalues linked list (sorted by stack index, descending)
     open_upvalues: Option<GcRef<LoxUpvalue>>,
+    /// Interned "init" string for fast lookup
+    init_string: GcRef<String>,
     /// Indicates if the virtual machine is in debug mode
     debug: bool,
     /// Source for error reporting
@@ -62,12 +64,16 @@ pub struct VirtualMachine {
 
 impl VirtualMachine {
     pub fn new(debug: bool) -> Self {
+        let mut gc = Gc::new();
+        let init_string = gc.intern("init").expect("Failed to intern 'init'");
+        
         let mut vm = Self {
-            gc: Gc::new(),
+            gc,
             frames: Vec::with_capacity(FRAMES_MAX),
             stack: Vec::new(),
             globals: HashMap::new(),
             open_upvalues: None,
+            init_string,
             debug,
             source: None,
         };
@@ -118,6 +124,9 @@ impl VirtualMachine {
             let upvalue = self.gc.deref(uv_ref);
             current = upvalue.next;
         }
+        
+        // Mark interned strings
+        self.gc.mark_object(self.init_string);
     }
 
     /// Format a value for display, dereferencing GC references
@@ -171,6 +180,7 @@ impl VirtualMachine {
                 let name = self.gc.deref(class.name);
                 format!("{} instance", name)
             }
+            Value::BoundMethod(_) => "<bound method>".to_string(),
             Value::CompilerString(s) => format!("{}", s),
             Value::CompilerFunction(_) => "<fn>".to_string(),
         }
@@ -483,6 +493,8 @@ impl VirtualMachine {
                         let value = value.clone();
                         self.pop();
                         self.push(value);
+                    } else if self.bind_method(instance.klass, name)? {
+                        // Method was bound
                     } else {
                         let name_str = self.gc.deref(name);
                         return Err(self.runtime_error(&format!(
@@ -506,6 +518,29 @@ impl VirtualMachine {
                     self.push(value);
                 } else {
                     return Err(self.runtime_error("Only instances have fields."));
+                }
+            }
+            Instruction::Method(idx) => {
+                let name = self.read_string(idx)?;
+                let method = self.peek(0).clone();
+                
+                let klass = self.peek(1).clone();
+                if let Value::Class(class_ref) = klass {
+                    let class = self.gc.deref_mut(class_ref);
+                    class.methods.insert(name, method);
+                    self.pop(); // Pop the method
+                } else {
+                    return Err(self.runtime_error("Expected a class for method definition."));
+                }
+            }
+            Instruction::Invoke(name_idx, arg_count) => {
+                let name = self.read_string(name_idx)?;
+                let receiver = self.peek(arg_count as usize).clone();
+                
+                if let Value::Instance(instance_ref) = receiver {
+                    self.invoke_from_class(self.gc.deref(instance_ref).klass, name, arg_count)?;
+                } else {
+                    return Err(self.runtime_error("Only instances have methods."));
                 }
             }
         };
@@ -593,6 +628,17 @@ impl VirtualMachine {
     /// Call a value (function or native)
     fn call_value(&mut self, callee: Value, arg_count: u8) -> Result<(), LoxError> {
         match callee {
+            Value::BoundMethod(bound_ref) => {
+                let bound = self.gc.deref(bound_ref);
+                let receiver = bound.receiver.clone();
+                let method = bound.method;
+                
+                // Place receiver in slot 0 (where the bound method was)
+                let stack_slot = self.stack.len() - arg_count as usize - 1;
+                self.stack[stack_slot] = receiver;
+                
+                self.call(method, arg_count)
+            }
             Value::Closure(closure) => self.call(closure, arg_count),
             Value::NativeFunction(native) => self.call_native(native, arg_count),
             Value::Class(class) => {
@@ -603,8 +649,20 @@ impl VirtualMachine {
                     .map_err(|_| self.runtime_error("Out of memory."))?;
                 // Replace the class on the stack with the instance
                 let stack_slot = self.stack.len() - arg_count as usize - 1;
-                self.stack[stack_slot] = Value::Instance(instance_ref);
-                Ok(())
+                self.stack[stack_slot] = Value::Instance(instance_ref.clone());
+                
+                // Look for initializer
+                let class_obj = self.gc.deref(class);
+                if let Some(initializer) = class_obj.methods.get(&self.init_string).cloned() {
+                    self.call_value(initializer, arg_count)
+                } else if arg_count != 0 {
+                    Err(self.runtime_error(&format!(
+                        "Expected 0 arguments but got {}.",
+                        arg_count
+                    )))
+                } else {
+                    Ok(())
+                }
             }
             _ => Err(self.runtime_error("Can only call functions and classes.")),
         }
@@ -657,6 +715,45 @@ impl VirtualMachine {
         self.stack.truncate(args_start - 1);
         self.push(result);
         Ok(())
+    }
+
+    /// Invoke a method from a class
+    fn invoke_from_class(&mut self, klass: GcRef<LoxClass>, name: GcRef<String>, arg_count: u8) -> Result<(), LoxError> {
+        let class = self.gc.deref(klass);
+        if let Some(method) = class.methods.get(&name).cloned() {
+            self.call_value(method, arg_count)
+        } else {
+            Err(self.runtime_error(&format!("Undefined property '{}'.", self.gc.deref(name))))
+        }
+    }
+
+    /// Bind a method to an instance, returning true if successful
+    fn bind_method(&mut self, klass: GcRef<LoxClass>, name: GcRef<String>) -> Result<bool, LoxError> {
+        let class = self.gc.deref(klass);
+        if let Some(method) = class.methods.get(&name).cloned() {
+            let receiver = self.peek(0).clone();
+            
+            // Extract closure from method
+            let method_closure = match &method {
+                Value::Closure(closure) => *closure,
+                _ => {
+                    return Err(self.runtime_error("Expected a closure for method binding."));
+                }
+            };
+            
+            // Create bound method
+            self.maybe_collect();
+            let bound = crate::object::LoxBoundMethod::new(receiver, method_closure);
+            let bound_ref = self.gc.alloc(bound)
+                .map_err(|_| self.runtime_error("Out of memory."))?;
+            
+            // Replace instance with bound method
+            self.pop();
+            self.push(Value::BoundMethod(bound_ref));
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Generate a runtime error with stack trace and source information
@@ -737,7 +834,7 @@ impl VirtualMachine {
                 Value::Bool(b) => Value::Bool(*b),
                 Value::Nil => Value::Nil,
                 // Runtime variants shouldn't appear in compiler output
-                Value::String(_) | Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) | Value::Class(_) | Value::Instance(_) => {
+                Value::String(_) | Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) | Value::Class(_) | Value::Instance(_) | Value::BoundMethod(_) => {
                     return Err(GcError);
                 }
             };
@@ -864,6 +961,7 @@ impl fmt::Display for Value {
             Value::NativeFunction(_) => write!(f, "<native fn>"),
             Value::Class(_) => write!(f, "<class>"),
             Value::Instance(_) => write!(f, "<instance>"),
+            Value::BoundMethod(_) => write!(f, "<bound method>"),
             Value::CompilerString(s) => write!(f, "{}", s),
             Value::CompilerFunction(_) => write!(f, "<fn>"),
         }

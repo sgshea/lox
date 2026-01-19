@@ -122,6 +122,11 @@ impl ParseRule {
                 infix: None,
                 precedence: Precedence::None,
             },
+            This => Self {
+                prefix: Some(this_),
+                infix: None,
+                precedence: Precedence::None,
+            },
             Dot => Self {
                 prefix: None,
                 infix: Some(dot),
@@ -159,6 +164,8 @@ struct Upvalue {
 enum FunctionType {
     Script,
     Function,
+    Method,
+    Initializer,
 }
 
 /// Compiler state for tracking local variables and scope
@@ -215,6 +222,11 @@ impl<'source> Compiler<'source> {
     }
 }
 
+/// Tracks class compilation context
+struct ClassCompiler {
+    enclosing: Option<Box<ClassCompiler>>,
+}
+
 pub struct Parser<'source> {
     pub scanner: Scanner<'source>,
 
@@ -225,6 +237,7 @@ pub struct Parser<'source> {
     pub interner: StringInterner,
 
     compiler: Compiler<'source>,
+    current_class: Option<ClassCompiler>,
 }
 
 impl<'source> Parser<'source> {
@@ -236,6 +249,7 @@ impl<'source> Parser<'source> {
             errors: Vec::new(),
             interner: StringInterner::new(),
             compiler: Compiler::new(FunctionType::Script),
+            current_class: None,
         }
     }
 
@@ -337,9 +351,51 @@ impl<'source> Parser<'source> {
         self.emit_at(Instruction::Class(name_constant), class_name);
         self.define_variable(name_constant);
 
+        // Push class compiler context
+        let previous_class = self.current_class.take();
+        self.current_class = Some(ClassCompiler {
+            enclosing: previous_class.map(Box::new),
+        });
+
         // Parse class body
         self.consume(TokenType::LeftBrace, "Expect '{' before class body.");
+        
+        // Load the class back onto stack for method definitions
+        self.emit(Instruction::GetGlobal(name_constant));
+
+        // Parse methods
+        while !self.check(TokenType::RightBrace) && !self.check(TokenType::Eof) {
+            self.consume(TokenType::Identifier, "Expect method name.");
+            let method_name = self.previous;
+            let method_name_constant = self.identifier_constant(method_name);
+
+            self.method(method_name_constant);
+        }
+
         self.consume(TokenType::RightBrace, "Expect '}' after class body.");
+
+        // Pop the class from stack
+        self.emit(Instruction::Pop);
+
+        // Pop class compiler context
+        if let Some(class) = self.current_class.take() {
+            self.current_class = class.enclosing.map(|b| *b);
+        }
+    }
+
+    fn method(&mut self, method_name_constant: usize) {
+        // Determine if this is an initializer or regular method
+        let method_name = self.previous.lexeme;
+        let function_type = if method_name == "init" {
+            FunctionType::Initializer
+        } else {
+            FunctionType::Method
+        };
+
+        self.function(function_type);
+
+        // Emit OP_METHOD instruction with the method name constant
+        self.emit(Instruction::Method(method_name_constant));
     }
 
     fn function(&mut self, function_type: FunctionType) {
@@ -352,6 +408,21 @@ impl<'source> Parser<'source> {
         self.compiler.enclosing = Some(Box::new(old_compiler));
 
         self.begin_scope();
+
+        // For methods and initializers, set slot 0 to 'this'
+        if function_type == FunctionType::Method || function_type == FunctionType::Initializer {
+            let this_token = Token {
+                kind: TokenType::Identifier,
+                lexeme: "this",
+                line: 0,
+                span: (0, 0),
+            };
+            self.compiler.locals[0] = Local {
+                name: this_token,
+                depth: self.compiler.scope_depth,
+                is_captured: false,
+            };
+        }
 
         // Parse parameters
         self.consume(TokenType::LeftParen, "Expect '(' after function name.");
@@ -407,7 +478,12 @@ impl<'source> Parser<'source> {
     }
 
     fn emit_return(&mut self) {
-        self.emit(Instruction::Nil);
+        if self.compiler.function_type == FunctionType::Initializer {
+            // Initializers return 'this' (which is at slot 0)
+            self.emit(Instruction::GetLocal(0));
+        } else {
+            self.emit(Instruction::Nil);
+        }
         self.emit(Instruction::Return);
     }
 
@@ -526,6 +602,9 @@ impl<'source> Parser<'source> {
         if self.match_token(TokenType::Semicolon) {
             self.emit_return();
         } else {
+            if self.compiler.function_type == FunctionType::Initializer {
+                self.error_at_previous("Can't return a value from an initializer.");
+            }
             self.expression();
             self.consume(TokenType::Semicolon, "Expect ';' after return value.");
             self.emit(Instruction::Return);
@@ -945,7 +1024,25 @@ fn dot(parser: &mut Parser, can_assign: bool) {
     if can_assign && parser.match_token(TokenType::Equal) {
         parser.expression();
         parser.emit(Instruction::SetProperty(name));
+    } else if parser.match_token(TokenType::LeftParen) {
+        // Method call: use OP_INVOKE
+        let mut arg_count = 0u8;
+        if !parser.check(TokenType::RightParen) {
+            loop {
+                parser.expression();
+                arg_count += 1;
+                if arg_count > u8::MAX {
+                    parser.error_at_current("Can't have more than 255 arguments.");
+                }
+                if !parser.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+        parser.consume(TokenType::RightParen, "Expect ')' after arguments.");
+        parser.emit(Instruction::Invoke(name, arg_count));
     } else {
+        // Property access
         parser.emit(Instruction::GetProperty(name));
     }
 }
@@ -1019,6 +1116,22 @@ fn literal(parser: &mut Parser, _can_assign: bool) {
 fn variable(parser: &mut Parser, can_assign: bool) {
     let name = parser.previous;
     parser.named_variable(name, can_assign);
+}
+
+fn this_(parser: &mut Parser, _can_assign: bool) {
+    if parser.current_class.is_none() {
+        parser.error_at_previous("Can't use 'this' outside of a class.");
+        return;
+    }
+
+    // Treat 'this' as a variable named "this"
+    let token = Token {
+        kind: TokenType::Identifier,
+        lexeme: "this",
+        line: parser.previous.line,
+        span: parser.previous.span,
+    };
+    parser.named_variable(token, false);
 }
 
 fn and_(parser: &mut Parser, _can_assign: bool) {

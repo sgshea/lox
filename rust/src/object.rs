@@ -174,6 +174,32 @@ pub struct UpvalueDescriptor {
     pub index: u8,
 }
 
+/// Represents a method bound to an instance
+pub struct LoxBoundMethod {
+    /// The instance (receiver) this method is bound to
+    pub receiver: Value,
+    /// The method closure
+    pub method: GcRef<LoxClosure>,
+}
+
+impl LoxBoundMethod {
+    pub fn new(receiver: Value, method: GcRef<LoxClosure>) -> Self {
+        Self { receiver, method }
+    }
+}
+
+impl fmt::Debug for LoxBoundMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<bound method>")
+    }
+}
+
+impl fmt::Display for LoxBoundMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<bound method>")
+    }
+}
+
 /// Type alias for native function implementations
 /// Takes a slice of argument values and returns a Result
 pub type NativeFn = fn(args: &[Value]) -> Result<Value, String>;
@@ -220,11 +246,16 @@ pub struct StringInterner {
 pub struct LoxClass {
     /// The class name
     pub name: GcRef<String>,
+    /// Methods of the class (method name -> closure)
+    pub methods: std::collections::HashMap<GcRef<String>, Value>,
 }
 
 impl LoxClass {
     pub fn new(name: GcRef<String>) -> Self {
-        Self { name }
+        Self { 
+            name,
+            methods: std::collections::HashMap::new(),
+        }
     }
 }
 
@@ -406,6 +437,28 @@ impl GcTrace for LoxClass {
     fn trace(&self, gc: &mut Gc) {
         // Mark the class name
         gc.mark_object(self.name);
+        // Mark all method keys and values
+        for (&key, value) in &self.methods {
+            gc.mark_object(key);
+            gc.mark_value(value);
+        }
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl GcTrace for LoxBoundMethod {
+    fn trace(&self, gc: &mut Gc) {
+        // Mark the receiver
+        gc.mark_value(&self.receiver);
+        // Mark the method closure
+        gc.mark_object(self.method);
     }
     
     fn as_any(&self) -> &dyn Any {
