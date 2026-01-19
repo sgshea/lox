@@ -1,0 +1,88 @@
+// Test inheritance and super calls
+
+class Animal {
+  speak() {
+    print "Some sound";
+  }
+}
+
+class Dog < Animal {
+  speak() {
+    print "Woof!";
+  }
+}
+
+// Basic inheritance
+var animal = Animal();
+animal.speak();
+
+var dog = Dog();
+dog.speak();
+
+// Method inheritance
+class A {
+  greet() {
+    print "Hello from A";
+  }
+}
+
+class B < A {}
+
+B().greet();
+
+// Super calls
+class Base {
+  method() {
+    print "Base method";
+  }
+}
+
+class Derived < Base {
+  method() {
+    super.method();
+    print "Derived method";
+  }
+}
+
+Derived().method();
+
+// Super in initializer
+class Parent {
+  init(name) {
+    this.name = name;
+  }
+}
+
+class Child < Parent {
+  init(name, age) {
+    super.init(name);
+    this.age = age;
+  }
+}
+
+var child = Child("Alice", 10);
+print child.name;
+print child.age;
+
+// Multi-level inheritance
+class Level1 {
+  say() {
+    print "Level1";
+  }
+}
+
+class Level2 < Level1 {
+  say() {
+    super.say();
+    print "Level2";
+  }
+}
+
+class Level3 < Level2 {
+  say() {
+    super.say();
+    print "Level3";
+  }
+}
+
+Level3().say();

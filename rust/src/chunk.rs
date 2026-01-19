@@ -56,6 +56,10 @@ pub enum Instruction {
     SetProperty(usize),  // Set property with name from constant at index
     Method(usize),       // Define a method with name from constant at index
     Invoke(usize, u8),   // Invoke method with name index and argument count
+    // Inheritance operations
+    Inherit,              // Copy methods from superclass to subclass
+    GetSuper(usize),      // Look up method on superclass (name at constant index)
+    SuperInvoke(usize, u8), // Optimized super method call (name index, arg count)
 }
 
 /// Values of the language
@@ -239,6 +243,15 @@ impl Debug for Chunk {
                 }
                 Instruction::Invoke(index, arg_count) => {
                     writeln!(f, "{:04} {:4} Invoke {:?} ({} args)", i, line, self.constants.get(*index), arg_count)?
+                }
+                Instruction::Inherit => {
+                    writeln!(f, "{:04} {:4} Inherit", i, line)?
+                }
+                Instruction::GetSuper(index) => {
+                    writeln!(f, "{:04} {:4} GetSuper {:?}", i, line, self.constants.get(*index))?
+                }
+                Instruction::SuperInvoke(index, arg_count) => {
+                    writeln!(f, "{:04} {:4} SuperInvoke {:?} ({} args)", i, line, self.constants.get(*index), arg_count)?
                 }
                 _ => writeln!(f, "{:04} {:4} {:?}", i, line, op_code)?,
             }

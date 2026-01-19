@@ -543,6 +543,56 @@ impl VirtualMachine {
                     return Err(self.runtime_error("Only instances have methods."));
                 }
             }
+            Instruction::Inherit => {
+                // Stack: [... superclass, subclass]
+                let superclass_val = self.peek(1).clone();
+                
+                if let Value::Class(superclass_ref) = superclass_val {
+                    if let Value::Class(subclass_ref) = self.peek(0).clone() {
+                        // Copy all methods from superclass to subclass
+                        let super_methods: Vec<_> = {
+                            let super_class = self.gc.deref(superclass_ref);
+                            super_class.methods.iter()
+                                .map(|(&k, v)| (k, v.clone()))
+                                .collect()
+                        };
+                        
+                        let sub_class = self.gc.deref_mut(subclass_ref);
+                        for (name, method) in super_methods {
+                            sub_class.methods.insert(name, method);
+                        }
+                    }
+                    self.pop();  // Pop subclass, leave superclass for "super" variable
+                } else {
+                    return Err(self.runtime_error("Superclass must be a class."));
+                }
+            }
+            Instruction::GetSuper(idx) => {
+                let name = self.read_string(idx)?;
+                let superclass = self.pop();  // Pop superclass
+                
+                if let Value::Class(superclass_ref) = superclass {
+                    // bind_method binds to instance on stack top
+                    if !self.bind_method(superclass_ref, name)? {
+                        let name_str = self.gc.deref(name);
+                        return Err(self.runtime_error(&format!(
+                            "Undefined property '{}'.", name_str
+                        )));
+                    }
+                } else {
+                    return Err(self.runtime_error("Superclass must be a class."));
+                }
+            }
+            Instruction::SuperInvoke(name_idx, arg_count) => {
+                let name = self.read_string(name_idx)?;
+                let superclass = self.pop();  // Pop superclass
+                
+                if let Value::Class(superclass_ref) = superclass {
+                    self.invoke_from_class(superclass_ref, name, arg_count)?;
+                } else {
+                    return Err(self.runtime_error("Superclass must be a class."));
+                }
+            }
         };
 
         Ok(None)

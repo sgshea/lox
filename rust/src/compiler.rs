@@ -127,6 +127,11 @@ impl ParseRule {
                 infix: None,
                 precedence: Precedence::None,
             },
+            Super => Self {
+                prefix: Some(super_),
+                infix: None,
+                precedence: Precedence::None,
+            },
             Dot => Self {
                 prefix: None,
                 infix: Some(dot),
@@ -225,6 +230,7 @@ impl<'source> Compiler<'source> {
 /// Tracks class compilation context
 struct ClassCompiler {
     enclosing: Option<Box<ClassCompiler>>,
+    has_superclass: bool,
 }
 
 pub struct Parser<'source> {
@@ -355,13 +361,41 @@ impl<'source> Parser<'source> {
         let previous_class = self.current_class.take();
         self.current_class = Some(ClassCompiler {
             enclosing: previous_class.map(Box::new),
+            has_superclass: false,
         });
+
+        // Check for superclass clause
+        if self.match_token(TokenType::Less) {
+            self.consume(TokenType::Identifier, "Expect superclass name.");
+            
+            // Load superclass by name (handles local/global)
+            variable(self, false);
+            
+            // Prevent self-inheritance
+            if Self::identifiers_equal(&class_name, &self.previous) {
+                self.error_at_previous("A class can't inherit from itself.");
+            }
+            
+            // Create scope for "super" variable
+            self.begin_scope();
+            self.add_local(self.synthetic_token("super"));
+            self.define_variable(0);
+            
+            // Load subclass and emit inherit instruction
+            self.named_variable(class_name, false);
+            self.emit(Instruction::Inherit);
+            
+            if let Some(ref mut class) = self.current_class {
+                class.has_superclass = true;
+            }
+        }
 
         // Parse class body
         self.consume(TokenType::LeftBrace, "Expect '{' before class body.");
         
         // Load the class back onto stack for method definitions
-        self.emit(Instruction::GetGlobal(name_constant));
+        // Use named_variable to support local classes
+        self.named_variable(class_name, false);
 
         // Parse methods
         while !self.check(TokenType::RightBrace) && !self.check(TokenType::Eof) {
@@ -376,6 +410,11 @@ impl<'source> Parser<'source> {
 
         // Pop the class from stack
         self.emit(Instruction::Pop);
+
+        // Close superclass scope if needed
+        if self.current_class.as_ref().map_or(false, |c| c.has_superclass) {
+            self.end_scope();
+        }
 
         // Pop class compiler context
         if let Some(class) = self.current_class.take() {
@@ -545,6 +584,16 @@ impl<'source> Parser<'source> {
 
     fn identifiers_equal(a: &Token, b: &Token) -> bool {
         a.lexeme == b.lexeme
+    }
+
+    /// Creates a synthetic token with the given text (used for "this" and "super")
+    fn synthetic_token(&self, text: &'static str) -> Token<'source> {
+        Token {
+            kind: TokenType::Identifier,
+            lexeme: text,
+            line: 0,
+            span: (0, 0),
+        }
     }
 
     fn add_local(&mut self, name: Token<'source>) {
@@ -1132,6 +1181,32 @@ fn this_(parser: &mut Parser, _can_assign: bool) {
         span: parser.previous.span,
     };
     parser.named_variable(token, false);
+}
+
+fn super_(parser: &mut Parser, _can_assign: bool) {
+    if parser.current_class.is_none() {
+        parser.error_at_previous("Can't use 'super' outside of a class.");
+    } else if !parser.current_class.as_ref().unwrap().has_superclass {
+        parser.error_at_previous("Can't use 'super' in a class with no superclass.");
+    }
+
+    parser.consume(TokenType::Dot, "Expect '.' after 'super'.");
+    parser.consume(TokenType::Identifier, "Expect superclass method name.");
+    let name = parser.identifier_constant(parser.previous);
+
+    // Load "this" (the instance)
+    parser.named_variable(parser.synthetic_token("this"), false);
+    
+    if parser.match_token(TokenType::LeftParen) {
+        // Optimized super invocation: super.method(args)
+        let arg_count = parser.argument_list();
+        parser.named_variable(parser.synthetic_token("super"), false);
+        parser.emit(Instruction::SuperInvoke(name, arg_count));
+    } else {
+        // Super access: super.method (returns bound method)
+        parser.named_variable(parser.synthetic_token("super"), false);
+        parser.emit(Instruction::GetSuper(name));
+    }
 }
 
 fn and_(parser: &mut Parser, _can_assign: bool) {

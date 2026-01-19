@@ -1,0 +1,64 @@
+// Test local classes (classes defined inside functions)
+
+// Local class returned from function
+fun makeCounter() {
+  class Counter {
+    init() {
+      this.count = 0;
+    }
+
+    increment() {
+      this.count = this.count + 1;
+      return this.count;
+    }
+  }
+
+  return Counter;
+}
+
+var Counter = makeCounter();
+var c = Counter();
+print c.increment();
+print c.increment();
+print c.increment();
+
+// Local class with inheritance from global class
+class Base {
+  greet() {
+    print "Hello from Base";
+  }
+}
+
+fun makeChild() {
+  class LocalChild < Base {
+    greet() {
+      super.greet();
+      print "Hello from LocalChild";
+    }
+  }
+  
+  return LocalChild;
+}
+
+var LocalChild = makeChild();
+LocalChild().greet();
+
+// Nested local classes with inheritance
+fun makeClasses() {
+  class LocalBase {
+    method() {
+      print "LocalBase";
+    }
+  }
+  
+  class LocalDerived < LocalBase {
+    method() {
+      super.method();
+      print "LocalDerived";
+    }
+  }
+  
+  return LocalDerived;
+}
+
+makeClasses()().method();
